@@ -15,12 +15,20 @@ if (!connectionString) {
 const pool = new Pool({ connectionString });
 const adapter = new PrismaPg(pool);
 
-export const db =
-  globalForPrisma.prisma ??
-  new PrismaClient({
+function createPrismaClient() {
+  return new PrismaClient({
     adapter,
     log: process.env.NODE_ENV === "development" ? ["query", "error", "warn"] : ["error"],
   });
+}
+
+const hasFlowRowDelegate = (client: PrismaClient | undefined) => {
+  return Boolean(client && "flowRow" in (client as unknown as Record<string, unknown>));
+};
+
+export const db = hasFlowRowDelegate(globalForPrisma.prisma)
+  ? globalForPrisma.prisma!
+  : createPrismaClient();
 
 if (process.env.NODE_ENV !== "production") {
   globalForPrisma.prisma = db;

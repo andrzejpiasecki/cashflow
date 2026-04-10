@@ -6,6 +6,11 @@ datasource db {
   provider = "postgresql"
 }
 
+enum FlowType {
+  income
+  expense
+}
+
 model Transaction {
   id          String   @id @default(cuid())
   userId      String
@@ -16,4 +21,19 @@ model Transaction {
   createdAt   DateTime @default(now())
 
   @@index([userId, date])
+}
+
+model FlowRow {
+  id         String   @id @default(cuid())
+  userId     String
+  type       FlowType
+  name       String
+  amount     Float
+  startMonth String
+  endMonth   String?
+  monthValues Json
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId, type])
 }
