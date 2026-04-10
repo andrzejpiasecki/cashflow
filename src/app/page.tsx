@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { UserButton } from "@clerk/nextjs";
+import { SignInButton, UserButton, useAuth } from "@clerk/nextjs";
 import { ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -39,6 +39,7 @@ const money = new Intl.NumberFormat("pl-PL", {
 });
 
 export default function Home() {
+  const { isLoaded, isSignedIn } = useAuth();
   const [rows, setRows] = useState<FlowRow[]>([]);
   const rowsRef = useRef<FlowRow[]>([]);
   const [yearOffset, setYearOffset] = useState(0);
@@ -47,7 +48,15 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
+    if (!isLoaded || !isSignedIn) {
+      setRows([]);
+      rowsRef.current = [];
+      setIsLoading(false);
+      return;
+    }
+
     const loadRows = async () => {
+      setIsLoading(true);
       try {
         const response = await fetch("/api/flow-rows");
         if (!response.ok) return;
@@ -59,7 +68,7 @@ export default function Home() {
       }
     };
     void loadRows();
-  }, []);
+  }, [isLoaded, isSignedIn]);
 
   const months = useMemo(() => getYearMonthsWindow(yearOffset), [yearOffset]);
   const incomeRows = useMemo(() => rows.filter((row) => row.type === "income"), [rows]);
@@ -225,6 +234,19 @@ export default function Home() {
 
   return (
     <main className="flex w-full max-w-none flex-1 flex-col gap-4 px-2 py-3 sm:px-4">
+      {!isSignedIn && (
+        <div className="flex min-h-[60vh] items-center justify-center">
+          <div className="rounded-sm border border-slate-300 bg-white p-6 text-center">
+            <h1 className="mb-2 text-xl font-semibold">Zaloguj się</h1>
+            <p className="mb-4 text-sm text-muted-foreground">Aby zobaczyć i edytować arkusz cashflow.</p>
+            <SignInButton mode="modal">
+              <Button>Zaloguj</Button>
+            </SignInButton>
+          </div>
+        </div>
+      )}
+      {isSignedIn && (
+      <>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Cashflow Spreadsheet</h1>
@@ -418,6 +440,8 @@ export default function Home() {
             </TableFooter>
           </Table>
       </div>
+      </>
+      )}
     </main>
   );
 }
