@@ -33,6 +33,11 @@ type MonthColumn = {
   label: string;
 };
 
+type SalesInput = {
+  passes: number;
+  singleEntries: number;
+};
+
 const money = new Intl.NumberFormat("pl-PL", {
   style: "decimal",
   maximumFractionDigits: 0,
@@ -45,6 +50,17 @@ export default function Home() {
   const [yearOffset, setYearOffset] = useState(0);
   const [citRate, setCitRate] = useState(19);
   const [vatRate, setVatRate] = useState(23);
+  const [salesByMonth, setSalesByMonth] = useState<Record<string, SalesInput>>({});
+  const [currentPassPrice, setCurrentPassPrice] = useState(240);
+  const [currentSinglePrice, setCurrentSinglePrice] = useState(55);
+  const [newPassPrice, setNewPassPrice] = useState(260);
+  const [newSinglePrice, setNewSinglePrice] = useState(60);
+  const [useNewPricing, setUseNewPricing] = useState(true);
+  const [extraClassStartMonth, setExtraClassStartMonth] = useState(monthKeyFromDate(new Date()));
+  const [extraClassesPerWeek, setExtraClassesPerWeek] = useState(2);
+  const [participantsPerClass, setParticipantsPerClass] = useState(6);
+  const [passSharePercent, setPassSharePercent] = useState(45);
+  const [avgVisitsPerPassClient, setAvgVisitsPerPassClient] = useState(4);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -71,6 +87,48 @@ export default function Home() {
   }, [isLoaded, isSignedIn]);
 
   const months = useMemo(() => getYearMonthsWindow(yearOffset), [yearOffset]);
+  const salesForecast = useMemo(() => {
+    return months.map(({ key }) => {
+      const sales = salesByMonth[key] ?? { passes: 0, singleEntries: 0 };
+      const baseRevenue = sales.passes * currentPassPrice + sales.singleEntries * currentSinglePrice;
+      const passPrice = useNewPricing ? newPassPrice : currentPassPrice;
+      const singlePrice = useNewPricing ? newSinglePrice : currentSinglePrice;
+      const directRevenue = sales.passes * passPrice + sales.singleEntries * singlePrice;
+
+      let extraRevenue = 0;
+      if (key >= extraClassStartMonth) {
+        const sessionsInMonth = (daysInMonthFromKey(key) / 7) * extraClassesPerWeek;
+        const extraParticipants = sessionsInMonth * participantsPerClass;
+        const passCustomers = (extraParticipants * (passSharePercent / 100)) / Math.max(avgVisitsPerPassClient, 1);
+        const singleEntries = extraParticipants * (1 - passSharePercent / 100);
+        extraRevenue = passCustomers * passPrice + singleEntries * singlePrice;
+      }
+
+      const projectedRevenue = directRevenue + extraRevenue;
+      return {
+        key,
+        passes: sales.passes,
+        singleEntries: sales.singleEntries,
+        baseRevenue,
+        projectedRevenue,
+        delta: projectedRevenue - baseRevenue,
+      };
+    });
+  }, [
+    months,
+    salesByMonth,
+    currentPassPrice,
+    currentSinglePrice,
+    newPassPrice,
+    newSinglePrice,
+    useNewPricing,
+    extraClassStartMonth,
+    extraClassesPerWeek,
+    participantsPerClass,
+    passSharePercent,
+    avgVisitsPerPassClient,
+  ]);
+
   const incomeRows = useMemo(() => rows.filter((row) => row.type === "income"), [rows]);
   const expenseRows = useMemo(() => rows.filter((row) => row.type === "expense"), [rows]);
 
@@ -162,6 +220,76 @@ export default function Home() {
       });
   };
 
+  const updateSalesCell = (month: string, field: keyof SalesInput, value: number) => {
+    setSalesByMonth((prev) => ({
+      ...prev,
+      [month]: {
+        passes: prev[month]?.passes ?? 0,
+        singleEntries: prev[month]?.singleEntries ?? 0,
+        [field]: value,
+      },
+    }));
+  };
+
+  const applySalesForecastToCashflow = () => {
+    const monthValues = Object.fromEntries(
+      salesForecast.map((entry) => [entry.key, Math.round(entry.projectedRevenue)]),
+    );
+
+    const startMonth = months[0]?.key ?? monthKeyFromDate(new Date());
+    const endMonth = months.at(-1)?.key ?? monthKeyFromDate(new Date());
+    const existing = rowsRef.current.find((row) => row.type === "income" && row.name === "Prognoza sprzedaży");
+
+    if (existing) {
+      const updated: FlowRow = {
+        ...existing,
+        amount: 0,
+        startMonth,
+        endMonth,
+        monthValues,
+      };
+      const nextRows = rowsRef.current.map((row) => (row.id === existing.id ? updated : row));
+      rowsRef.current = nextRows;
+      setRows(nextRows);
+
+      void fetch("/api/flow-rows", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: existing.id,
+          patch: { amount: 0, startMonth, endMonth, monthValues },
+        }),
+      });
+      return;
+    }
+
+    const draft: FlowRow = {
+      id: crypto.randomUUID(),
+      type: "income",
+      name: "Prognoza sprzedaży",
+      amount: 0,
+      startMonth,
+      endMonth,
+      monthValues,
+    };
+
+    rowsRef.current = [...rowsRef.current, draft];
+    setRows(rowsRef.current);
+
+    void fetch("/api/flow-rows", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    }).then((response) => {
+      if (!response.ok) return;
+      void response.json().then((saved: FlowRow) => {
+        const nextRows = rowsRef.current.map((row) => (row.id === draft.id ? saved : row));
+        rowsRef.current = nextRows;
+        setRows(nextRows);
+      });
+    });
+  };
+
   const updateRow = (id: string, patch: Partial<FlowRow>) => {
     let patchForServer: Partial<FlowRow> = patch;
     const nextRows = rowsRef.current.map((row) => {
@@ -247,6 +375,123 @@ export default function Home() {
       )}
       {isSignedIn && (
       <>
+      <div className="rounded-sm border border-slate-300 bg-white p-3">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <p className="text-sm font-semibold">Studio Pilates: sprzedaż i prognoza</p>
+          <Button className="h-8 px-2 text-xs" onClick={applySalesForecastToCashflow}>
+            Wpisz prognozę do cashflow
+          </Button>
+        </div>
+        <div className="mb-3 grid gap-2 md:grid-cols-2 xl:grid-cols-6">
+          <label className="text-xs">
+            Cena karnetu (aktualna)
+            <Input type="number" value={currentPassPrice} onChange={(e) => setCurrentPassPrice(Number(e.target.value) || 0)} className="h-8" />
+          </label>
+          <label className="text-xs">
+            Cena wejścia (aktualna)
+            <Input type="number" value={currentSinglePrice} onChange={(e) => setCurrentSinglePrice(Number(e.target.value) || 0)} className="h-8" />
+          </label>
+          <label className="text-xs">
+            Cena karnetu (nowa)
+            <Input type="number" value={newPassPrice} onChange={(e) => setNewPassPrice(Number(e.target.value) || 0)} className="h-8" />
+          </label>
+          <label className="text-xs">
+            Cena wejścia (nowa)
+            <Input type="number" value={newSinglePrice} onChange={(e) => setNewSinglePrice(Number(e.target.value) || 0)} className="h-8" />
+          </label>
+          <label className="text-xs">
+            Start nowego slotu
+            <Input type="month" value={extraClassStartMonth} onChange={(e) => setExtraClassStartMonth(e.target.value || monthKeyFromDate(new Date()))} className="h-8" />
+          </label>
+          <label className="flex items-center gap-2 pt-5 text-xs">
+            <input type="checkbox" checked={useNewPricing} onChange={(e) => setUseNewPricing(e.target.checked)} />
+            Użyj nowych cen
+          </label>
+          <label className="text-xs">
+            Dodatkowe zajęcia / tydzień
+            <Input type="number" value={extraClassesPerWeek} onChange={(e) => setExtraClassesPerWeek(Number(e.target.value) || 0)} className="h-8" />
+          </label>
+          <label className="text-xs">
+            Osób na zajęciach
+            <Input type="number" value={participantsPerClass} onChange={(e) => setParticipantsPerClass(Number(e.target.value) || 0)} className="h-8" />
+          </label>
+          <label className="text-xs">
+            Udział karnetów (%)
+            <Input type="number" value={passSharePercent} onChange={(e) => setPassSharePercent(Number(e.target.value) || 0)} className="h-8" />
+          </label>
+          <label className="text-xs">
+            Śr. wejść / klient karnetu
+            <Input type="number" value={avgVisitsPerPassClient} onChange={(e) => setAvgVisitsPerPassClient(Number(e.target.value) || 1)} className="h-8" />
+          </label>
+        </div>
+        <Table className="w-full table-fixed border-collapse text-xs tabular-nums">
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="w-[180px] border border-slate-300 bg-slate-100">Metryka sprzedaży</TableHead>
+              {months.map((month) => (
+                <TableHead key={month.key} className="w-[84px] border border-slate-300 bg-slate-100 text-right text-xs">
+                  {month.label}
+                </TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            <TableRow className="hover:bg-transparent">
+              <TableCell className="border border-slate-300">Sprzedane karnety</TableCell>
+              {salesForecast.map((entry) => (
+                <TableCell key={entry.key} className="border border-slate-300 p-0">
+                  <Input
+                    type="number"
+                    value={entry.passes}
+                    onChange={(e) => updateSalesCell(entry.key, "passes", Number(e.target.value) || 0)}
+                    className="h-8 rounded-none border-0 bg-transparent px-1 text-right text-xs [appearance:textfield]"
+                  />
+                </TableCell>
+              ))}
+            </TableRow>
+            <TableRow className="hover:bg-transparent">
+              <TableCell className="border border-slate-300">Sprzedane wejścia jednorazowe</TableCell>
+              {salesForecast.map((entry) => (
+                <TableCell key={entry.key} className="border border-slate-300 p-0">
+                  <Input
+                    type="number"
+                    value={entry.singleEntries}
+                    onChange={(e) => updateSalesCell(entry.key, "singleEntries", Number(e.target.value) || 0)}
+                    className="h-8 rounded-none border-0 bg-transparent px-1 text-right text-xs [appearance:textfield]"
+                  />
+                </TableCell>
+              ))}
+            </TableRow>
+            <TableRow className="hover:bg-transparent">
+              <TableCell className="border border-slate-300 font-semibold">Przychód bazowy</TableCell>
+              {salesForecast.map((entry) => (
+                <TableCell key={entry.key} className="border border-slate-300 text-right">
+                  {money.format(entry.baseRevenue)}
+                </TableCell>
+              ))}
+            </TableRow>
+            <TableRow className="hover:bg-transparent">
+              <TableCell className="border border-slate-300 font-semibold">Przychód prognozowany</TableCell>
+              {salesForecast.map((entry) => (
+                <TableCell key={entry.key} className="border border-slate-300 text-right font-semibold text-emerald-700">
+                  {money.format(entry.projectedRevenue)}
+                </TableCell>
+              ))}
+            </TableRow>
+            <TableRow className="hover:bg-transparent">
+              <TableCell className="border border-slate-300 font-semibold">Zmiana (prognoza - baza)</TableCell>
+              {salesForecast.map((entry) => (
+                <TableCell
+                  key={entry.key}
+                  className={`border border-slate-300 text-right font-semibold ${entry.delta >= 0 ? "text-emerald-700" : "text-rose-700"}`}
+                >
+                  {money.format(entry.delta)}
+                </TableCell>
+              ))}
+            </TableRow>
+          </TableBody>
+        </Table>
+      </div>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Cashflow Spreadsheet</h1>
@@ -595,4 +840,11 @@ function isMonthInRange(monthKey: string, startMonthKey: string, endMonthKey: st
   const monthNumber = Number(monthKey.split("-")[1]);
   const endMonthNumber = Number(endMonthKey.split("-")[1]);
   return monthNumber <= endMonthNumber;
+}
+
+function daysInMonthFromKey(monthKey: string) {
+  const [year, month] = monthKey.split("-");
+  const y = Number(year);
+  const m = Number(month);
+  return new Date(y, m, 0).getDate();
 }
