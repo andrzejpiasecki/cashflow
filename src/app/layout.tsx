@@ -40,7 +40,13 @@ export default function RootLayout({
   return (
     <html lang="pl" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col">
-        <ClerkProvider>
+        <ClerkProvider
+          signInUrl="/sign-in"
+          signUpUrl="/sign-up"
+          signInFallbackRedirectUrl="/cashflow"
+          signUpFallbackRedirectUrl="/cashflow"
+          afterSignOutUrl="/sign-in"
+        >
           <PwaRegister />
           {children}
         </ClerkProvider>

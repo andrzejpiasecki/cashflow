@@ -187,6 +187,34 @@ function buildClientsSummary(records: SalesRecord[], months: string[]) {
   return [...byClient.values()].sort((a, b) => b.totalAmount - a.totalAmount).slice(0, 200);
 }
 
+function estimatePassCycleDays(passPurchaseDates: Date[]) {
+  if (passPurchaseDates.length < 2) return 30;
+  const sorted = [...passPurchaseDates].sort((a, b) => a.getTime() - b.getTime());
+  const intervals: number[] = [];
+  for (let index = 1; index < sorted.length; index += 1) {
+    const days = Math.round((sorted[index].getTime() - sorted[index - 1].getTime()) / 86400000);
+    if (days >= 7 && days <= 60) intervals.push(days);
+  }
+  if (intervals.length === 0) return 30;
+  intervals.sort((a, b) => a - b);
+  const middle = Math.floor(intervals.length / 2);
+  const median = intervals.length % 2 === 0 ? Math.round((intervals[middle - 1] + intervals[middle]) / 2) : intervals[middle];
+  return Math.max(21, Math.min(35, median));
+}
+
+function getPriority(score: number) {
+  if (score >= 35) return "wysoki";
+  if (score >= 18) return "sredni";
+  return "niski";
+}
+
+function getFreshnessWeight(daysSince: number) {
+  if (daysSince <= 45) return 1;
+  if (daysSince <= 90) return 0.6;
+  if (daysSince <= 120) return 0.25;
+  return 0;
+}
+
 function buildAnalytics(records: SalesRecord[]) {
   const months = [...new Set(records.map((row) => row.month))].sort();
   const latestMonth = months.at(-1) ?? null;
@@ -219,6 +247,21 @@ function buildAnalytics(records: SalesRecord[]) {
   const activeClientsByMonth = createMonthlyObject(months, 0);
   const churnByMonth = createMonthlyObject(months, 0);
   const arpuByMonth = createMonthlyObject(months, 0);
+  const clientStats = new Map<
+    string,
+    {
+      name: string;
+      lifetimeRevenue: number;
+      purchaseCount: number;
+      lastPurchaseDate: Date;
+      lastPassPurchaseDate: Date | null;
+      passPurchaseDates: Date[];
+      purchaseMonths: Set<string>;
+      passMonths: Set<string>;
+      singleEntryCount: number;
+      lastSingleEntryDate: Date | null;
+    }
+  >();
   for (let i = 0; i < months.length; i += 1) {
     const month = months[i];
     activeClientsByMonth[month] = uniqueClientsByMonth[month].size;
@@ -240,6 +283,103 @@ function buildAnalytics(records: SalesRecord[]) {
   const latestActive = latestMonth ? activeClientsByMonth[latestMonth] || 0 : 0;
   const latestChurn = latestMonth ? churnByMonth[latestMonth] || 0 : 0;
   const latestMrr = latestMonth ? mrrByMonth[latestMonth] || 0 : 0;
+
+  for (const row of records) {
+    const stat = clientStats.get(row.clientKey) ?? {
+      name: row.clientName,
+      lifetimeRevenue: 0,
+      purchaseCount: 0,
+      lastPurchaseDate: row.date,
+      lastPassPurchaseDate: null,
+      passPurchaseDates: [],
+      purchaseMonths: new Set<string>(),
+      passMonths: new Set<string>(),
+      singleEntryCount: 0,
+      lastSingleEntryDate: null,
+    };
+    stat.name = row.clientName;
+    stat.lifetimeRevenue += row.amount;
+    stat.purchaseCount += 1;
+    if (row.date > stat.lastPurchaseDate) stat.lastPurchaseDate = row.date;
+    stat.purchaseMonths.add(row.month);
+    if (row.isPass) {
+      stat.passPurchaseDates.push(row.date);
+      stat.passMonths.add(row.month);
+      if (!stat.lastPassPurchaseDate || row.date > stat.lastPassPurchaseDate) stat.lastPassPurchaseDate = row.date;
+    } else if (/wejsc|wejść|jednoraz/i.test(row.product)) {
+      stat.singleEntryCount += 1;
+      if (!stat.lastSingleEntryDate || row.date > stat.lastSingleEntryDate) stat.lastSingleEntryDate = row.date;
+    }
+    clientStats.set(row.clientKey, stat);
+  }
+
+  const contacts = [...clientStats.values()]
+    .map((client) => {
+      const nowTs = Date.now();
+      const daysSinceLastPurchase = Math.max(0, Math.floor((Date.now() - client.lastPurchaseDate.getTime()) / 86400000));
+      const daysSinceLastPass = client.lastPassPurchaseDate
+        ? Math.max(0, Math.floor((nowTs - client.lastPassPurchaseDate.getTime()) / 86400000))
+        : null;
+      const daysSinceLastSingle = client.lastSingleEntryDate
+        ? Math.max(0, Math.floor((nowTs - client.lastSingleEntryDate.getTime()) / 86400000))
+        : null;
+      const expectedCycleDays = client.lastPassPurchaseDate ? estimatePassCycleDays(client.passPurchaseDates) : null;
+      const hasPassLatest = latestMonth ? client.passMonths.has(latestMonth) : false;
+      const hasPurchaseLatest = latestMonth ? client.purchaseMonths.has(latestMonth) : false;
+      const hasNotConvertedSingle =
+        client.lastSingleEntryDate && (!client.lastPassPurchaseDate || client.lastPassPurchaseDate < client.lastSingleEntryDate);
+
+      let score = 0;
+      let reason = "";
+
+      if (hasNotConvertedSingle && daysSinceLastSingle !== null) {
+        if (daysSinceLastSingle > 120) {
+          score = 0;
+          reason = "";
+        } else {
+        const freshness = getFreshnessWeight(daysSinceLastSingle);
+        const recencyBonus = daysSinceLastSingle <= 45 ? 14 : daysSinceLastSingle <= 90 ? 8 : 0;
+        score = (34 + Math.min(12, client.singleEntryCount * 2) + recencyBonus) * freshness;
+        reason = "Jednorazowe wejscie bez konwersji na karnet";
+        }
+      } else if (client.lastPassPurchaseDate && !hasPassLatest && daysSinceLastPass !== null) {
+        if (daysSinceLastPass > 120) {
+          score = 0;
+          reason = "";
+        } else {
+          const overdue = daysSinceLastPass - (expectedCycleDays ?? 30);
+          const overduePart = Math.min(26, Math.max(0, overdue) * 0.9);
+          const ltvPart = Math.min(10, client.lifetimeRevenue / 400);
+          const freshness = getFreshnessWeight(daysSinceLastPass);
+          score = (18 + overduePart + ltvPart + (hasPurchaseLatest ? 0 : 5)) * freshness;
+          reason = overdue > 5 ? "Karnet prawdopodobnie nie zostal odnowiony" : "Klient po karnecie bez kolejnego zakupu";
+        }
+      } else if (!hasPurchaseLatest && daysSinceLastPurchase >= 30) {
+        if (daysSinceLastPurchase > 90) {
+          score = 0;
+          reason = "";
+        } else {
+          score = (12 + Math.min(12, daysSinceLastPurchase / 5)) * getFreshnessWeight(daysSinceLastPurchase);
+          reason = "Brak zakupu od dluzszego czasu";
+        }
+      }
+
+      return {
+        name: client.name,
+        lastPurchaseDate: client.lastPurchaseDate.toISOString(),
+        daysSinceLastPurchase,
+        lastPassPurchaseDate: client.lastPassPurchaseDate?.toISOString() ?? null,
+        daysSinceLastPass,
+        expectedCycleDays,
+        lifetimeRevenue: client.lifetimeRevenue,
+        reason,
+        score: Math.round(score),
+        priority: getPriority(score),
+      };
+    })
+    .filter((client) => client.score >= 12 && client.reason)
+    .sort((a, b) => b.score - a.score || a.daysSinceLastPurchase - b.daysSinceLastPurchase || b.lifetimeRevenue - a.lifetimeRevenue)
+    .slice(0, 30);
 
   const selectedMonths = [previousMonth, latestMonth].filter((month): month is string => Boolean(month));
   const selectedSet = new Set(selectedMonths);
@@ -290,6 +430,7 @@ function buildAnalytics(records: SalesRecord[]) {
     productCount,
     activeClientsByMonth,
     dailyRevenue: buildDailyRevenueSeries(records),
+    contacts,
     newClientSales: segmentSales.filter((sale) => sale.isNewForMonth).slice(0, 100),
     returningClientSales: segmentSales.filter((sale) => !sale.isNewForMonth).slice(0, 100),
     clientsSummary: buildClientsSummary(records, months),

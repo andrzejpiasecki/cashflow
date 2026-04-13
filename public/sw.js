@@ -1,9 +1,5 @@
-const CACHE_NAME = "cashflow-real-v1";
+const CACHE_NAME = "cashflow-real-v3";
 const PRECACHE_URLS = [
-  "/",
-  "/cashflow",
-  "/dashboard",
-  "/settings",
   "/manifest.webmanifest",
   "/icon-192.png",
   "/icon-512.png",
@@ -37,19 +33,8 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/")) return;
 
   if (request.mode === "navigate") {
-    event.respondWith(
-      fetch(request)
-        .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-          return response;
-        })
-        .catch(async () => {
-          const cached = await caches.match(request);
-          if (cached) return cached;
-          return caches.match("/cashflow");
-        }),
-    );
+    // Never cache auth-sensitive HTML navigations; let Clerk/Next resolve them live.
+    event.respondWith(fetch(request));
     return;
   }
 

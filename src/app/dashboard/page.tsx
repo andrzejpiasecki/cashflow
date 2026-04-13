@@ -24,6 +24,18 @@ type DashboardPayload = {
   productCount: Record<string, number>;
   activeClientsByMonth: Record<string, number>;
   dailyRevenue: { labels: string[]; values: number[]; previousValues: number[] };
+  contacts: {
+    name: string;
+    lastPurchaseDate: string;
+    daysSinceLastPurchase: number;
+    lastPassPurchaseDate: string | null;
+    daysSinceLastPass: number | null;
+    expectedCycleDays: number | null;
+    lifetimeRevenue: number;
+    reason: string;
+    score: number;
+    priority: string;
+  }[];
   newClientSales: { month: string; date: string; clientName: string; product: string; amount: number; monthLinkStatus: string }[];
   returningClientSales: { month: string; date: string; clientName: string; product: string; amount: number; monthLinkStatus: string }[];
   clientsSummary: { name: string; purchaseCount: number; totalAmount: number; purchasesByMonth: Record<string, number> }[];
@@ -134,14 +146,7 @@ export default function DashboardPage() {
             </div>
           </section>
 
-          <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            <StatCard label="MRR" value={money.format(data.latestMrr)} />
-            <StatCard label="ARPU" value={money.format(data.latestArpu)} />
-            <StatCard label="Aktywni klienci" value={String(data.latestActive)} />
-            <StatCard label="Churn" value={`${data.latestChurn.toFixed(1)}%`} />
-          </section>
-
-          <section className="grid gap-3 xl:grid-cols-2">
+          <section className="grid gap-3">
             <ChartCard title="Przychód miesięczny">
               <ChartWrap>
                 <ResponsiveContainer width="100%" height="100%">
@@ -216,20 +221,11 @@ export default function DashboardPage() {
               </ChartWrap>
             </ChartCard>
 
-            <ChartCard title="Aktywni klienci w czasie">
-              <ChartWrap tall>
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart accessibilityLayer={false} data={monthlyChartData} margin={{ top: 6, right: 10, left: -10, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(15,23,42,0.1)" />
-                    <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-                    <YAxis tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} width={44} />
-                    <Tooltip contentStyle={tooltipStyle} formatter={(value) => [String(value), "Aktywni klienci"]} />
-                    <Line type="monotone" dataKey="activeClients" stroke="#6366f1" strokeWidth={2.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </ChartWrap>
-            </ChartCard>
           </section>
+
+          <TableCard title="Klienci do kontaktu">
+            <ContactsTable rows={data.contacts} />
+          </TableCard>
 
           <TableCard title="Nowi klienci - sprzedaż">
             <SalesTable rows={data.newClientSales} tableType="new" />
@@ -245,15 +241,6 @@ export default function DashboardPage() {
         </div>
       )}
     </AppShell>
-  );
-}
-
-function StatCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-slate-200/70 bg-white/90 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)] backdrop-blur-sm">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="mt-1 text-xl font-semibold">{value}</p>
-    </div>
   );
 }
 
@@ -397,6 +384,68 @@ function ClientsTable({
   );
 }
 
+function ContactsTable({
+  rows,
+}: {
+  rows: {
+    name: string;
+    lastPurchaseDate: string;
+    daysSinceLastPurchase: number;
+    lastPassPurchaseDate: string | null;
+    daysSinceLastPass: number | null;
+    expectedCycleDays: number | null;
+    lifetimeRevenue: number;
+    reason: string;
+    score: number;
+    priority: string;
+  }[];
+}) {
+  return (
+    <div className="max-w-full overflow-x-auto">
+      <Table className="min-w-[980px] text-xs">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Klient</TableHead>
+            <TableHead>Ostatni zakup</TableHead>
+            <TableHead className="text-right">Dni bez zakupu</TableHead>
+            <TableHead>Ostatni karnet</TableHead>
+            <TableHead className="text-right">Cykl</TableHead>
+            <TableHead>Powod kontaktu</TableHead>
+            <TableHead className="text-right">LTV</TableHead>
+            <TableHead className="text-right">Score</TableHead>
+            <TableHead>Priorytet</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.length === 0 ? (
+            <TableRow>
+              <TableCell colSpan={9} className="text-muted-foreground">
+                Brak klientów do kontaktu.
+              </TableCell>
+            </TableRow>
+          ) : (
+            rows.map((row) => (
+              <TableRow key={`${row.name}-${row.lastPurchaseDate}`} className={row.priority === "wysoki" ? "bg-rose-50/60" : row.priority === "sredni" ? "bg-amber-50/60" : ""}>
+                <TableCell>{row.name}</TableCell>
+                <TableCell>{new Date(row.lastPurchaseDate).toLocaleDateString("pl-PL")}</TableCell>
+                <TableCell className="text-right">{row.daysSinceLastPurchase}</TableCell>
+                <TableCell>{row.lastPassPurchaseDate ? new Date(row.lastPassPurchaseDate).toLocaleDateString("pl-PL") : "-"}</TableCell>
+                <TableCell className="text-right">{row.expectedCycleDays ?? "-"}</TableCell>
+                <TableCell>{row.reason}</TableCell>
+                <TableCell className="text-right">{money.format(row.lifetimeRevenue)}</TableCell>
+                <TableCell className="text-right">{row.score}</TableCell>
+                <TableCell>
+                  <span className={getPriorityBadgeClass(row.priority)}>{formatPriority(row.priority)}</span>
+                </TableCell>
+              </TableRow>
+            ))
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 function formatMonthKey(monthKey: string) {
   const [year, month] = monthKey.split("-");
   return `${month}/${year}`;
@@ -431,6 +480,17 @@ function getSalesBadgeClass(status: string) {
     return "inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700";
   }
   return "inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600";
+}
+
+function getPriorityBadgeClass(priority: string) {
+  if (priority === "wysoki") return "inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700";
+  if (priority === "sredni") return "inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700";
+  return "inline-flex rounded-full bg-sky-100 px-2 py-0.5 text-xs font-semibold text-sky-700";
+}
+
+function formatPriority(priority: string) {
+  if (priority === "sredni") return "sredni";
+  return priority;
 }
 
 function formatPeriodLabel(start: Date, end: Date) {

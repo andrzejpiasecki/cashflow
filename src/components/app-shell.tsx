@@ -2,9 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { SignInButton, UserButton, useAuth } from "@clerk/nextjs";
-
-import { Button } from "@/components/ui/button";
+import { UserButton, useAuth } from "@clerk/nextjs";
 
 type AppShellProps = {
   title: string;
@@ -26,9 +24,12 @@ export function AppShell({ title, subtitle, children }: AppShellProps) {
         <div className="rounded-sm border border-slate-300 bg-white p-6 text-center">
           <h1 className="mb-2 text-xl font-semibold">Zaloguj się</h1>
           <p className="mb-4 text-sm text-muted-foreground">Aby korzystać z modułów cashflow i dashboardu.</p>
-          <SignInButton mode="modal">
-            <Button>Zaloguj</Button>
-          </SignInButton>
+          <Link
+            href="/sign-in"
+            className="inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          >
+            Zaloguj
+          </Link>
         </div>
       </main>
     );
@@ -61,7 +62,7 @@ export function AppShell({ title, subtitle, children }: AppShellProps) {
             Settings
           </Link>
         </nav>
-        <UserButton />
+        <UserButton userProfileMode="navigation" userProfileUrl="/user-profile" />
       </header>
       {children}
     </main>
