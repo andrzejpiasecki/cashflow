@@ -63,6 +63,7 @@ export async function POST(request: NextRequest) {
   const startMonth = String(body.startMonth ?? "");
   const endMonth = body.endMonth ? String(body.endMonth) : null;
   const monthValues = normalizeMonthValues(body.monthValues);
+  const isImported = Boolean(body.isImported);
 
   if (!name || !startMonth || (type !== "income" && type !== "expense")) {
     return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
@@ -74,6 +75,7 @@ export async function POST(request: NextRequest) {
         userId,
         type,
         name,
+        isImported,
         amount,
         startMonth,
         endMonth,
@@ -125,6 +127,20 @@ export async function PATCH(request: NextRequest) {
   if (patch.monthValues !== undefined) data.monthValues = normalizeMonthValues(patch.monthValues);
 
   try {
+    const existingRow = await db.flowRow.findFirst({
+      where: { id, userId },
+      select: { isImported: true },
+    });
+    if (!existingRow) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    if (
+      existingRow.isImported &&
+      (patch.name !== undefined || patch.amount !== undefined || patch.startMonth !== undefined || patch.endMonth !== undefined || patch.monthValues !== undefined)
+    ) {
+      return NextResponse.json({ error: "Imported rows are read-only." }, { status: 400 });
+    }
+
     const row = await db.flowRow.updateMany({
       where: { id, userId },
       data,

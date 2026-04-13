@@ -53,3 +53,14 @@ input[type="number"] {
   -moz-appearance: textfield;
   appearance: textfield;
 }
+
+input[type="date"].date-empty::-webkit-datetime-edit {
+  color: transparent;
+}
+
+.recharts-wrapper:focus,
+.recharts-wrapper:focus-visible,
+.recharts-surface:focus,
+.recharts-surface:focus-visible {
+  outline: none !important;
+}

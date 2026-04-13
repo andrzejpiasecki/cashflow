@@ -22,11 +22,13 @@ function createPrismaClient() {
   });
 }
 
-const hasFlowRowDelegate = (client: PrismaClient | undefined) => {
-  return Boolean(client && "flowRow" in (client as unknown as Record<string, unknown>));
+const hasRequiredDelegates = (client: PrismaClient | undefined) => {
+  if (!client) return false;
+  const c = client as unknown as Record<string, unknown>;
+  return "flowRow" in c && "fitsseySettings" in c;
 };
 
-export const db = hasFlowRowDelegate(globalForPrisma.prisma)
+export const db = hasRequiredDelegates(globalForPrisma.prisma)
   ? globalForPrisma.prisma!
   : createPrismaClient();
 

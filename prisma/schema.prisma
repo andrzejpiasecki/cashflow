@@ -11,6 +11,11 @@ enum FlowType {
   expense
 }
 
+enum FitsseyAuthMode {
+  apiKey
+  basic
+}
+
 model Transaction {
   id          String   @id @default(cuid())
   userId      String
@@ -28,6 +33,7 @@ model FlowRow {
   userId     String
   type       FlowType
   name       String
+  isImported Boolean  @default(false)
   amount     Float
   startMonth String
   endMonth   String?
@@ -36,4 +42,25 @@ model FlowRow {
   updatedAt  DateTime @updatedAt
 
   @@index([userId, type])
+}
+
+model FitsseySettings {
+  id                      String          @id @default(cuid())
+  userId                  String          @unique
+  studioUuid              String
+  authMode                FitsseyAuthMode @default(apiKey)
+  apiKey                  String?
+  username                String?
+  password                String?
+  startDate               DateTime?
+  citRate                 Float           @default(19)
+  vatRate                 Float           @default(23)
+  autoImportEnabled       Boolean         @default(true)
+  autoImportIntervalMins  Int             @default(180)
+  lastImportedAt          DateTime?
+  lastImportStatus        String?
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+
+  @@index([userId])
 }
