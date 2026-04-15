@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { AppShell } from "@/components/app-shell";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -19,6 +19,7 @@ type DashboardPayload = {
   revenueMoMChange: number | null;
   revenueByMonth: Record<string, number>;
   mrrByMonth: Record<string, number>;
+  passesSoldByMonth?: Record<string, number>;
   newClientsByMonth: Record<string, number>;
   returningClientsByMonth: Record<string, number>;
   productCount: Record<string, number>;
@@ -77,10 +78,11 @@ export default function DashboardPage() {
 
   const monthlyChartData = useMemo(() => {
     if (!data) return [];
+    const passesSoldByMonth = data.passesSoldByMonth ?? {};
     return data.months.map((month) => ({
       month: formatMonthKey(month),
       revenue: Math.round(data.revenueByMonth[month] ?? 0),
-      mrr: Math.round(data.mrrByMonth[month] ?? 0),
+      passesSold: passesSoldByMonth[month] ?? 0,
       newClients: data.newClientsByMonth[month] ?? 0,
       returningClients: data.returningClientsByMonth[month] ?? 0,
       activeClients: data.activeClientsByMonth[month] ?? 0,
@@ -161,16 +163,16 @@ export default function DashboardPage() {
               </ChartWrap>
             </ChartCard>
 
-            <ChartCard title="MRR i trend miesięczny">
+            <ChartCard title="Sprzedane karnety miesięcznie">
               <ChartWrap>
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart accessibilityLayer={false} data={monthlyChartData} margin={{ top: 6, right: 10, left: -10, bottom: 0 }}>
+                  <BarChart accessibilityLayer={false} data={monthlyChartData} margin={{ top: 6, right: 10, left: -10, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(15,23,42,0.1)" />
                     <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
                     <YAxis tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} width={44} />
-                    <Tooltip contentStyle={tooltipStyle} formatter={(value) => [money.format(Number(value || 0)), "MRR"]} />
-                    <Line type="monotone" dataKey="mrr" stroke="#0ea5e9" strokeWidth={2.5} dot={false} />
-                  </LineChart>
+                    <Tooltip contentStyle={tooltipStyle} formatter={(value) => [String(value ?? 0), "Sprzedane karnety"]} />
+                    <Bar dataKey="passesSold" fill="#0ea5e9" radius={[6, 6, 0, 0]} />
+                  </BarChart>
                 </ResponsiveContainer>
               </ChartWrap>
             </ChartCard>

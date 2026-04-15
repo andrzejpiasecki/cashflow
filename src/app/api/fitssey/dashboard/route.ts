@@ -46,6 +46,13 @@ function safeText(value: unknown) {
   return String(value ?? "").trim();
 }
 
+function isPassProduct(product: string) {
+  const normalized = product.toLowerCase();
+  return /karnet|pass|pakiet/.test(normalized)
+    || /\d+\s*wej(?:ść|sc)/i.test(product)
+    || /\d+\s*\+\s*\d+/.test(normalized);
+}
+
 async function getFitsseyCredentials() {
   const settingsDelegate = getFitsseySettingsDelegate();
   if (!settingsDelegate) {
@@ -90,7 +97,7 @@ function mapSalesRow(row: SalesRow): SalesRecord | null {
     clientKey: clientName.toLowerCase(),
     product,
     amount,
-    isPass: /karnet|pass|pakiet/i.test(product),
+    isPass: isPassProduct(product),
   };
 }
 
@@ -223,6 +230,7 @@ function buildAnalytics(records: SalesRecord[]) {
   const previousMonth = months.length > 1 ? months.at(-2) ?? null : null;
   const revenueByMonth = createMonthlyObject(months, 0);
   const mrrByMonth = createMonthlyObject(months, 0);
+  const passesSoldByMonth = createMonthlyObject(months, 0);
   const salesByMonth = createMonthlyObject(months, 0);
   const newClientsByMonth = createMonthlyObject(months, 0);
   const returningClientsByMonth = createMonthlyObject(months, 0);
@@ -233,7 +241,10 @@ function buildAnalytics(records: SalesRecord[]) {
   for (const row of records) {
     revenueByMonth[row.month] += row.amount;
     salesByMonth[row.month] += 1;
-    if (row.isPass) mrrByMonth[row.month] += row.amount;
+    if (row.isPass) {
+      mrrByMonth[row.month] += row.amount;
+      passesSoldByMonth[row.month] += 1;
+    }
     productCount[row.product] = (productCount[row.product] || 0) + 1;
     uniqueClientsByMonth[row.month].add(row.clientKey);
     if (!clientFirstMonth[row.clientKey]) clientFirstMonth[row.clientKey] = row.month;
@@ -427,6 +438,7 @@ function buildAnalytics(records: SalesRecord[]) {
     revenueMoMChange: comparable.revenueMoMChange,
     revenueByMonth,
     mrrByMonth,
+    passesSoldByMonth,
     newClientsByMonth,
     returningClientsByMonth,
     productCount,
