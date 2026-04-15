@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Info } from "lucide-react";
 
 import { AppShell } from "@/components/app-shell";
 import { NumericInput } from "@/components/numeric-input";
@@ -45,6 +45,12 @@ type FillModalState = {
   endMonth: string;
 };
 
+type InfoPopoverPosition = {
+  top: number;
+  left: number;
+  placement: "above" | "below";
+};
+
 const money = new Intl.NumberFormat("pl-PL", {
   style: "decimal",
   maximumFractionDigits: 0,
@@ -69,6 +75,10 @@ export default function CashflowPage() {
   const [showFitsseyIncomeRows, setShowFitsseyIncomeRows] = useState(true);
   const [fillModal, setFillModal] = useState<FillModalState | null>(null);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [showVatInfo, setShowVatInfo] = useState(false);
+  const [vatInfoPosition, setVatInfoPosition] = useState<InfoPopoverPosition | null>(null);
+  const [showCitInfo, setShowCitInfo] = useState(false);
+  const [citInfoPosition, setCitInfoPosition] = useState<InfoPopoverPosition | null>(null);
 
   useEffect(() => {
     if (!fillModal) return;
@@ -193,6 +203,58 @@ export default function CashflowPage() {
     return buildMonthRange(earliestMonth, displayEndMonth);
   }, [rows, displayStartMonth, displayEndMonth]);
 
+  const vatMonthBreakdown = useMemo(() => {
+    const actualByMonth = timelineMonths.map((key) => {
+      const income = incomeRows.reduce((sum, row) => sum + getCellValue(row, key), 0);
+      const expenses = expenseRows.reduce((sum, row) => sum + getCellValue(row, key), 0);
+      return { key, income, expenses };
+    });
+
+    const previousMonthsIncome = actualByMonth
+      .filter((month) => month.key < currentMonthKey)
+      .map((month) => month.income)
+      .slice(-3);
+    const forecastBaseline = previousMonthsIncome.length > 0
+      ? Math.round(previousMonthsIncome.reduce((sum, value) => sum + value, 0) / previousMonthsIncome.length)
+      : 0;
+
+    return new Map(
+      actualByMonth.map((month) => {
+        const manualIncomeGross = incomeRows
+          .filter((row) => !row.isImported)
+          .reduce((sum, row) => sum + getCellValue(row, month.key), 0);
+        const importedIncomeGrossActual = incomeRows
+          .filter((row) => row.isImported)
+          .reduce((sum, row) => sum + getCellValue(row, month.key), 0);
+        const importedIncomeGrossEffective = month.key > currentMonthKey ? Math.round(forecastBaseline) : importedIncomeGrossActual;
+        const importedOutputVat = incomeRows
+          .filter((row) => row.isImported)
+          .reduce((sum, row) => {
+            const rowValue = month.key > currentMonthKey
+              ? (importedIncomeGrossActual > 0 ? (getCellValue(row, month.key) / importedIncomeGrossActual) * importedIncomeGrossEffective : 0)
+              : getCellValue(row, month.key);
+            const rowVatRate = row.vatRate ?? DEFAULT_FITSSEY_VAT_RATE;
+            return sum + vatFromGross(rowValue, rowVatRate);
+          }, 0);
+        const manualOutputVat = vatFromGross(manualIncomeGross, vatRate);
+        const inputVat = vatFromGross(month.expenses, EXPENSE_VAT_RATE);
+        return [
+          month.key,
+          {
+            key: month.key,
+            importedIncomeGross: importedIncomeGrossEffective,
+            manualIncomeGross,
+            expensesGross: month.expenses,
+            importedOutputVat,
+            manualOutputVat,
+            inputVat,
+            netVat: importedOutputVat + manualOutputVat - inputVat,
+          },
+        ];
+      }),
+    );
+  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, vatRate]);
+
   const timelineComputed = useMemo(() => {
     const actualByMonth = timelineMonths.map((key) => {
       const income = incomeRows.reduce((sum, row) => sum + getCellValue(row, key), 0);
@@ -212,34 +274,24 @@ export default function CashflowPage() {
     let cumulative = 0;
     let cumulativeNet = 0;
     let previousSettlementIndex = -1;
-    const vatAccrual = actualByMonth.map((month) => {
-      const manualIncomeWithoutImported = incomeRows
-        .filter((row) => !row.isImported)
-        .reduce((sum, row) => sum + getCellValue(row, month.key), 0);
-      const importedIncome = incomeRows
-        .filter((row) => row.isImported)
-        .reduce((sum, row) => sum + getCellValue(row, month.key), 0);
-      const forecastImportedIncome = month.key > currentMonthKey ? Math.round(forecastBaseline) : importedIncome;
-      const importedOutputVat = incomeRows
-        .filter((row) => row.isImported)
-        .reduce((sum, row) => {
-          const rowValue = month.key > currentMonthKey
-            ? (importedIncome > 0 ? (getCellValue(row, month.key) / importedIncome) * forecastImportedIncome : 0)
-            : getCellValue(row, month.key);
-          const rowVatRate = row.vatRate ?? DEFAULT_FITSSEY_VAT_RATE;
-          return sum + vatFromGross(rowValue, rowVatRate);
-        }, 0);
-      const manualOutputVat = vatFromGross(manualIncomeWithoutImported, vatRate);
-      const inputVat = vatFromGross(month.expenses, EXPENSE_VAT_RATE);
-      return importedOutputVat + manualOutputVat - inputVat;
-    });
+    const yearProfitYtd = new Map<number, number>();
+    const yearCitPaidYtd = new Map<number, number>();
+    const vatAccrual = actualByMonth.map((month) => vatMonthBreakdown.get(month.key)?.netVat ?? 0);
 
     for (let index = 0; index < actualByMonth.length; index += 1) {
       const month = actualByMonth[index];
       const forecastIncome = month.key > currentMonthKey ? Math.round(forecastBaseline) : month.income;
       const effectiveIncome = forecastIncome;
       const balance = effectiveIncome - month.expenses;
-      const cit = Math.max(balance, 0) * (citRate / 100);
+      const year = Number(month.key.slice(0, 4));
+      const prevProfitYtd = yearProfitYtd.get(year) ?? 0;
+      const nextProfitYtd = prevProfitYtd + balance;
+      yearProfitYtd.set(year, nextProfitYtd);
+      const citBaseYtd = Math.max(nextProfitYtd, 0);
+      const citDueYtd = citBaseYtd * (citRate / 100);
+      const paidYtd = yearCitPaidYtd.get(year) ?? 0;
+      const cit = Math.max(citDueYtd - paidYtd, 0);
+      yearCitPaidYtd.set(year, paidYtd + cit);
       const isSettlementMonth = isQuarterSettlementMonth(month.key);
       const vatPayment = isSettlementMonth ? vatAccrual.slice(previousSettlementIndex + 1, index + 1).reduce((sum, amount) => sum + amount, 0) : 0;
       if (isSettlementMonth) previousSettlementIndex = index;
@@ -254,6 +306,8 @@ export default function CashflowPage() {
         expenses: month.expenses,
         balance,
         cit,
+        citBaseYtd,
+        citDueYtd,
         vatPayment,
         cumulative,
         cumulativeNet,
@@ -261,7 +315,34 @@ export default function CashflowPage() {
     }
 
     return new Map(computed.map((month) => [month.key, month]));
-  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, citRate, vatRate]);
+  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, citRate, vatMonthBreakdown]);
+
+  const taxInfoMonthKey = useMemo(() => {
+    if (vatMonthBreakdown.has(currentMonthKey) || timelineComputed.has(currentMonthKey)) return currentMonthKey;
+    const latestKey = [...timelineComputed.keys()].sort().at(-1);
+    return latestKey ?? currentMonthKey;
+  }, [vatMonthBreakdown, timelineComputed, currentMonthKey]);
+
+  const currentMonthVatInfo = useMemo(() => {
+    const fallback = {
+      key: taxInfoMonthKey,
+      importedIncomeGross: 0,
+      manualIncomeGross: 0,
+      expensesGross: 0,
+      importedOutputVat: 0,
+      manualOutputVat: 0,
+      inputVat: 0,
+      netVat: 0,
+      vatPayment: 0,
+    };
+    const monthData = vatMonthBreakdown.get(taxInfoMonthKey);
+    if (!monthData) return fallback;
+    return {
+      ...monthData,
+      key: taxInfoMonthKey,
+      vatPayment: timelineComputed.get(taxInfoMonthKey)?.vatPayment ?? 0,
+    };
+  }, [vatMonthBreakdown, timelineComputed, taxInfoMonthKey]);
 
   const effectiveMonthlyTotals = useMemo(
     () =>
@@ -295,6 +376,19 @@ export default function CashflowPage() {
       }),
     [months, timelineComputed],
   );
+
+  const currentMonthCitInfo = useMemo(() => {
+    const monthData = timelineComputed.get(taxInfoMonthKey);
+    return {
+      key: taxInfoMonthKey,
+      income: monthData?.income ?? 0,
+      expenses: monthData?.expenses ?? 0,
+      balance: monthData?.balance ?? 0,
+      taxableBase: monthData?.citBaseYtd ?? 0,
+      citDueYtd: monthData?.citDueYtd ?? 0,
+      cit: monthData?.cit ?? 0,
+    };
+  }, [timelineComputed, taxInfoMonthKey]);
 
   const cumulativeNetAfterTax = useMemo(
     () => months.map((month) => ({ key: month.key, value: timelineComputed.get(month.key)?.cumulativeNet ?? 0 })),
@@ -492,9 +586,61 @@ export default function CashflowPage() {
                     <span className="text-right text-blue-700">{money.format(forecast)}</span>
                     <span className="text-slate-500">Wydatki</span>
                     <span className="text-right text-rose-700">{money.format(monthly?.expenses ?? 0)}</span>
-                    <span className="text-slate-500">CIT</span>
+                    <span className="inline-flex items-center gap-1 text-slate-500">
+                      CIT
+                      <button
+                        type="button"
+                        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-600"
+                        onClick={(event) => {
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          const panelWidth = Math.min(340, window.innerWidth - 24);
+                          const estimatedPanelHeight = 220;
+                          const desiredLeft = rect.left - 18;
+                          const maxLeft = Math.max(12, window.innerWidth - panelWidth - 12);
+                          const canOpenAbove = rect.top - 12 >= estimatedPanelHeight;
+                          const placement: "above" | "below" = canOpenAbove ? "above" : "below";
+                          const top = placement === "above" ? rect.top - 6 : rect.bottom + 8;
+                          setCitInfoPosition({
+                            top,
+                            left: Math.max(12, Math.min(desiredLeft, maxLeft)),
+                            placement,
+                          });
+                          setShowVatInfo(false);
+                          setShowCitInfo((prev) => !prev);
+                        }}
+                        aria-label="Sposób liczenia CIT"
+                      >
+                        <Info className="h-3 w-3" />
+                      </button>
+                    </span>
                     <span className="text-right text-amber-700">{money.format(taxes?.cit ?? 0)}</span>
-                    <span className="text-slate-500">VAT (kwartał)</span>
+                    <span className="inline-flex items-center gap-1 text-slate-500">
+                      VAT (kwartał)
+                      <button
+                        type="button"
+                        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-600"
+                        onClick={(event) => {
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          const panelWidth = Math.min(340, window.innerWidth - 24);
+                          const estimatedPanelHeight = 260;
+                          const desiredLeft = rect.left - 18;
+                          const maxLeft = Math.max(12, window.innerWidth - panelWidth - 12);
+                          const canOpenAbove = rect.top - 12 >= estimatedPanelHeight;
+                          const placement: "above" | "below" = canOpenAbove ? "above" : "below";
+                          const top = placement === "above" ? rect.top - 6 : rect.bottom + 8;
+                          setVatInfoPosition({
+                            top,
+                            left: Math.max(12, Math.min(desiredLeft, maxLeft)),
+                            placement,
+                          });
+                          setShowCitInfo(false);
+                          setShowVatInfo((prev) => !prev);
+                        }}
+                        aria-label="Sposób liczenia VAT"
+                      >
+                        <Info className="h-3 w-3" />
+                      </button>
+                    </span>
                     <span className="text-right">{money.format(taxes?.vatPayment ?? 0)}</span>
                     <span className="text-slate-500">Stan skumulowany</span>
                     <span className="text-right">{money.format(cumulative)}</span>
@@ -514,7 +660,12 @@ export default function CashflowPage() {
               <TableRow className="hover:bg-transparent">
                 <TableHead className="border border-slate-300 bg-slate-100">Nazwa</TableHead>
                 {months.map((month) => (
-                  <TableHead key={month.key} className="border border-slate-300 bg-slate-100 px-1 text-right text-[10px] sm:text-xs">
+                  <TableHead
+                    key={month.key}
+                    className={`border px-1 text-right text-[10px] sm:text-xs ${
+                      month.key === currentMonthKey ? "border-blue-300 bg-blue-50 text-blue-800" : "border-slate-300 bg-slate-100"
+                    }`}
+                  >
                     {month.label}
                   </TableHead>
                 ))}
@@ -543,6 +694,7 @@ export default function CashflowPage() {
                   key={row.id}
                   row={row}
                   months={months}
+                  currentMonthKey={currentMonthKey}
                   onUpdateCell={updateCellValue}
                   onOpenFillModal={openFillModal}
                 />
@@ -552,6 +704,7 @@ export default function CashflowPage() {
                 key={row.id}
                 row={row}
                 months={months}
+                currentMonthKey={currentMonthKey}
                 onUpdateCell={updateCellValue}
                 onOpenFillModal={openFillModal}
               />
@@ -564,6 +717,7 @@ export default function CashflowPage() {
                 key={row.id}
                 row={row}
                 months={months}
+                currentMonthKey={currentMonthKey}
                 onUpdateCell={updateCellValue}
                 onOpenFillModal={openFillModal}
               />
@@ -571,18 +725,82 @@ export default function CashflowPage() {
             <SectionAddRow label="+ Dodaj wydatek" onClick={() => addRow("expense")} colSpan={months.length + 2} />
             </TableBody>
             <TableFooter className="bg-white">
-              <SummaryRow label="Miesięczne przychody" values={effectiveMonthlyTotals.map((v) => v.income)} textClass="text-emerald-700" />
-              <SummaryRow label="Prognoza przychodów (auto)" values={forecastIncomeTotals} textClass="text-blue-700" />
-              <SummaryRow label="Miesięczne wydatki" values={effectiveMonthlyTotals.map((v) => v.expenses)} textClass="text-rose-700" />
-              <SummaryRow label="Miesięczne saldo" values={effectiveMonthlyTotals.map((v) => v.balance)} />
-              <SummaryRow label="Stan skumulowany" values={cumulativeBalances.map((v) => v.value)} totalMode="last" />
-              <SummaryRow label="Podatek dochodowy spółki (CIT)" values={taxTotals.map((v) => v.cit)} textClass="text-amber-700" />
+              <SummaryRow label="Miesięczne przychody" values={effectiveMonthlyTotals.map((v) => v.income)} textClass="text-emerald-700" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
+              <SummaryRow label="Prognoza przychodów (auto)" values={forecastIncomeTotals} textClass="text-blue-700" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
+              <SummaryRow label="Miesięczne wydatki" values={effectiveMonthlyTotals.map((v) => v.expenses)} textClass="text-rose-700" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
+              <SummaryRow label="Miesięczne saldo" values={effectiveMonthlyTotals.map((v) => v.balance)} currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
+              <SummaryRow label="Stan skumulowany" values={cumulativeBalances.map((v) => v.value)} totalMode="last" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
               <SummaryRow
-                label="VAT płatny kwartalnie"
+                label={(
+                  <div className="inline-flex items-center gap-1">
+                    <span>Podatek dochodowy spółki (CIT) - płatny miesięcznie</span>
+                    <button
+                      type="button"
+                      className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-600 hover:bg-slate-100"
+                      onClick={(event) => {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        const panelWidth = Math.min(340, window.innerWidth - 24);
+                        const estimatedPanelHeight = 220;
+                        const desiredLeft = rect.left - 18;
+                        const maxLeft = Math.max(12, window.innerWidth - panelWidth - 12);
+                        const canOpenAbove = rect.top - 12 >= estimatedPanelHeight;
+                        const placement: "above" | "below" = canOpenAbove ? "above" : "below";
+                        const top = placement === "above" ? rect.top - 6 : rect.bottom + 8;
+                        setCitInfoPosition({
+                          top,
+                          left: Math.max(12, Math.min(desiredLeft, maxLeft)),
+                          placement,
+                        });
+                        setShowVatInfo(false);
+                        setShowCitInfo((prev) => !prev);
+                      }}
+                      aria-label="Sposób liczenia CIT"
+                    >
+                      <Info className="h-3 w-3" />
+                    </button>
+                  </div>
+                )}
+                values={taxTotals.map((v) => v.cit)}
+                textClass="text-amber-700"
+                currentMonthKey={currentMonthKey}
+                monthKeys={months.map((m) => m.key)}
+              />
+              <SummaryRow
+                label={(
+                  <div className="inline-flex items-center gap-1">
+                    <span>VAT płatny kwartalnie</span>
+                    <button
+                      type="button"
+                      className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-600 hover:bg-slate-100"
+                      onClick={(event) => {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        const panelWidth = Math.min(340, window.innerWidth - 24);
+                        const estimatedPanelHeight = 260;
+                        const desiredLeft = rect.left - 18;
+                        const maxLeft = Math.max(12, window.innerWidth - panelWidth - 12);
+                        const canOpenAbove = rect.top - 12 >= estimatedPanelHeight;
+                        const placement: "above" | "below" = canOpenAbove ? "above" : "below";
+                        const top = placement === "above" ? rect.top - 6 : rect.bottom + 8;
+                        setVatInfoPosition({
+                          top,
+                          left: Math.max(12, Math.min(desiredLeft, maxLeft)),
+                          placement,
+                        });
+                        setShowCitInfo(false);
+                        setShowVatInfo((prev) => !prev);
+                      }}
+                      aria-label="Sposób liczenia VAT"
+                    >
+                      <Info className="h-3 w-3" />
+                    </button>
+                  </div>
+                )}
                 values={taxTotals.map((v) => v.vatPayment)}
                 valueClassBySign
+                currentMonthKey={currentMonthKey}
+                monthKeys={months.map((m) => m.key)}
               />
-              <SummaryRow label="Stan skumulowany po podatkach" values={cumulativeNetAfterTax.map((v) => v.value)} totalMode="last" />
+              <SummaryRow label="Stan skumulowany po podatkach" values={cumulativeNetAfterTax.map((v) => v.value)} totalMode="last" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
             </TableFooter>
           </Table>
         </div>
@@ -683,6 +901,68 @@ export default function CashflowPage() {
           </div>
         </div>
       )}
+      {showVatInfo && vatInfoPosition && (
+        <div
+          className="fixed z-[60] w-[min(340px,calc(100vw-24px))] max-h-[min(320px,calc(100vh-24px))] overflow-y-auto rounded-sm border border-slate-300 bg-white p-3 text-xs font-normal text-slate-700 shadow-[0_12px_24px_rgba(15,23,42,0.16)]"
+          style={{
+            top: vatInfoPosition.top,
+            left: vatInfoPosition.left,
+            transform: vatInfoPosition.placement === "above" ? "translateY(-100%)" : "none",
+          }}
+        >
+          <p className="font-semibold">
+            VAT za aktualny miesiąc {formatMonthKeyLabel(currentMonthVatInfo.key)}
+          </p>
+          <p className="mt-2">
+            Przychody Fitssey (brutto): <strong>{money.format(currentMonthVatInfo.importedIncomeGross)}</strong>, VAT należny
+            (stawka z API lub fallback 8%): <strong>{money.format(currentMonthVatInfo.importedOutputVat)}</strong>
+          </p>
+          <p className="mt-1">
+            Pozostałe przychody (brutto): <strong>{money.format(currentMonthVatInfo.manualIncomeGross)}</strong>, VAT należny
+            ({money.format(vatRate)}%): <strong>{money.format(currentMonthVatInfo.manualOutputVat)}</strong>
+          </p>
+          <p className="mt-1">
+            Wydatki (brutto): <strong>{money.format(currentMonthVatInfo.expensesGross)}</strong>, VAT naliczony
+            (23%): <strong>{money.format(currentMonthVatInfo.inputVat)}</strong>
+          </p>
+          <p className="mt-2 font-semibold">
+            VAT miesięczny = VAT należny - VAT naliczony = {money.format(currentMonthVatInfo.netVat)}
+          </p>
+          <p className="mt-1 font-semibold">
+            Płatność VAT w tym miesiącu (rozliczenie kwartalne): {money.format(currentMonthVatInfo.vatPayment)}
+          </p>
+        </div>
+      )}
+      {showCitInfo && citInfoPosition && (
+        <div
+          className="fixed z-[60] w-[min(340px,calc(100vw-24px))] max-h-[min(320px,calc(100vh-24px))] overflow-y-auto rounded-sm border border-slate-300 bg-white p-3 text-xs font-normal text-slate-700 shadow-[0_12px_24px_rgba(15,23,42,0.16)]"
+          style={{
+            top: citInfoPosition.top,
+            left: citInfoPosition.left,
+            transform: citInfoPosition.placement === "above" ? "translateY(-100%)" : "none",
+          }}
+        >
+          <p className="font-semibold">CIT za aktualny miesiąc {formatMonthKeyLabel(currentMonthCitInfo.key)}</p>
+          <p className="mt-2">
+            Przychody: <strong>{money.format(currentMonthCitInfo.income)}</strong>
+          </p>
+          <p className="mt-1">
+            Wydatki: <strong>{money.format(currentMonthCitInfo.expenses)}</strong>
+          </p>
+          <p className="mt-1">
+            Saldo miesiąca: <strong>{money.format(currentMonthCitInfo.balance)}</strong>
+          </p>
+          <p className="mt-1">
+            Podstawa CIT narastająco w roku = max(0, wynik YTD): <strong>{money.format(currentMonthCitInfo.taxableBase)}</strong>
+          </p>
+          <p className="mt-1">
+            Podatek należny narastająco: <strong>{money.format(currentMonthCitInfo.citDueYtd)}</strong>
+          </p>
+          <p className="mt-2 font-semibold">
+            Zaliczka CIT za miesiąc = podatek narastająco - wcześniej zapłacone zaliczki = {money.format(currentMonthCitInfo.cit)}
+          </p>
+        </div>
+      )}
     </AppShell>
   );
 }
@@ -705,12 +985,16 @@ function SummaryRow({
   textClass,
   valueClassBySign,
   totalMode = "sum",
+  currentMonthKey,
+  monthKeys,
 }: {
-  label: string;
+  label: React.ReactNode;
   values: number[];
   textClass?: string;
   valueClassBySign?: boolean;
   totalMode?: "sum" | "last";
+  currentMonthKey?: string;
+  monthKeys?: string[];
 }) {
   const total = totalMode === "last" ? (values.at(-1) ?? 0) : values.reduce((sum, value) => sum + value, 0);
   return (
@@ -721,7 +1005,9 @@ function SummaryRow({
       {values.map((value, index) => (
         <TableCell
           key={index}
-          className={`border border-slate-300 text-right text-xs font-semibold ${
+          className={`border text-right text-xs font-semibold ${
+            monthKeys?.[index] === currentMonthKey ? "border-blue-300 bg-blue-50" : "border-slate-300"
+          } ${
             valueClassBySign ? (value >= 0 ? "text-amber-700" : "text-emerald-700") : textClass ?? (value >= 0 ? "text-emerald-700" : "text-rose-700")
           }`}
         >
@@ -736,11 +1022,12 @@ function SummaryRow({
 type SpreadsheetRowProps = {
   row: FlowRow;
   months: MonthColumn[];
+  currentMonthKey: string;
   onUpdateCell: (rowId: string, month: string, value: number) => void;
   onOpenFillModal: (row: FlowRow) => void;
 };
 
-function SpreadsheetRow({ row, months, onUpdateCell, onOpenFillModal }: SpreadsheetRowProps) {
+function SpreadsheetRow({ row, months, currentMonthKey, onUpdateCell, onOpenFillModal }: SpreadsheetRowProps) {
   const rowTotal = months.reduce((sum, month) => sum + getCellValue(row, month.key), 0);
   const toneClass = row.type === "income" ? "text-emerald-700" : "text-rose-700";
   const readOnlyImported = row.isImported;
@@ -761,7 +1048,7 @@ function SpreadsheetRow({ row, months, onUpdateCell, onOpenFillModal }: Spreadsh
       {months.map((month) => {
         const value = getCellValue(row, month.key);
         return (
-          <TableCell key={month.key} className="border border-slate-300 p-0">
+          <TableCell key={month.key} className={`border p-0 ${month.key === currentMonthKey ? "border-blue-300 bg-blue-50/40" : "border-slate-300"}`}>
             {readOnlyImported ? (
               <div className="flex h-8 items-center justify-end px-2 text-xs">{money.format(value)}</div>
             ) : (
@@ -808,6 +1095,11 @@ function getCellValue(row: FlowRow, month: string) {
 
 function monthKeyFromDate(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function formatMonthKeyLabel(monthKey: string) {
+  const [year, month] = monthKey.split("-");
+  return `${month}/${year}`;
 }
 
 function getYearMonthsWindow(yearOffset: number): MonthColumn[] {
