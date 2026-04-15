@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db";
+import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
 type FitsseyAuthMode = "apiKey";
 
@@ -17,6 +18,12 @@ type FitsseySalesRow = {
   itemName?: string;
   itemTotalPrice?: number | string;
   itemPrice?: number | string;
+  vatRate?: number | string;
+  itemVatRate?: number | string;
+  taxRate?: number | string;
+  itemTaxRate?: number | string;
+  itemVat?: number | string;
+  itemTax?: number | string;
 };
 
 const FITSSEY_BASE_URL_TEMPLATE = "https://app.fitssey.com/{uuid}/api/v4/public";
@@ -27,10 +34,10 @@ function hasFitsseySettingsDelegate() {
   return "fitsseySettings" in (db as unknown as Record<string, unknown>);
 }
 
-async function updateImportStatus(userId: string, status: string, importedAt?: Date) {
+async function updateImportStatus(status: string, importedAt?: Date) {
   if (!hasFitsseySettingsDelegate()) return;
   await db.fitsseySettings.updateMany({
-    where: { userId },
+    where: { userId: SHARED_SCOPE_ID },
     data: importedAt ? { lastImportedAt: importedAt, lastImportStatus: status } : { lastImportStatus: status },
   });
 }
@@ -39,8 +46,9 @@ function getMonthKey(date: Date) {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-async function resolveAuthConfig(userId: string): Promise<FitsseyAuthConfig> {
-  const settings = await db.fitsseySettings.findUnique({ where: { userId } });
+async function resolveAuthConfig(): Promise<FitsseyAuthConfig> {
+  const settings = (await db.fitsseySettings.findUnique({ where: { userId: SHARED_SCOPE_ID } }))
+    ?? (await db.fitsseySettings.findFirst({ orderBy: { updatedAt: "desc" } }));
   if (settings) {
     const defaultStartDate = DEFAULT_START_DATE;
     const startDate = settings.startDate ? settings.startDate.toISOString().slice(0, 10) : defaultStartDate;
@@ -118,8 +126,32 @@ async function fetchSalesRows(config: FitsseyAuthConfig, startDate: string, endD
   return rows;
 }
 
+function parseVatRate(raw: unknown): number | null {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  if (value <= 1) return Math.round(value * 10000) / 100;
+  if (value <= 100) return Math.round(value * 100) / 100;
+  return null;
+}
+
+function extractFitsseyVatRate(row: FitsseySalesRow): number | null {
+  const candidates = [
+    row.vatRate,
+    row.itemVatRate,
+    row.taxRate,
+    row.itemTaxRate,
+    row.itemVat,
+    row.itemTax,
+  ];
+  for (const candidate of candidates) {
+    const parsed = parseVatRate(candidate);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+}
+
 function aggregateRevenueByProductAndMonth(rows: FitsseySalesRow[]) {
-  const map = new Map<string, { name: string; monthValues: Record<string, number> }>();
+  const map = new Map<string, { name: string; monthValues: Record<string, number>; vatRateVotes: Record<string, number> }>();
 
   const normalizeName = (value: string) => value.replace(/\s+/g, " ").trim();
 
@@ -136,14 +168,19 @@ function aggregateRevenueByProductAndMonth(rows: FitsseySalesRow[]) {
     if (!Number.isFinite(amount) || amount === 0) continue;
 
     const month = getMonthKey(date);
-    const record = map.get(product) ?? { name: product, monthValues: {} };
+    const record = map.get(product) ?? { name: product, monthValues: {}, vatRateVotes: {} };
     const monthValues = record.monthValues;
     monthValues[month] = (monthValues[month] ?? 0) + amount;
+    const rowVatRate = extractFitsseyVatRate(row);
+    if (rowVatRate !== null) {
+      const key = String(rowVatRate);
+      record.vatRateVotes[key] = (record.vatRateVotes[key] ?? 0) + 1;
+    }
     record.name = product;
     map.set(product, record);
   }
 
-  const normalized = new Map<string, { name: string; monthValues: Record<string, number> }>();
+  const normalized = new Map<string, { name: string; monthValues: Record<string, number>; vatRate: number }>();
   for (const [key, value] of map.entries()) {
     const roundedMonthValues: Record<string, number> = {};
     let total = 0;
@@ -154,7 +191,11 @@ function aggregateRevenueByProductAndMonth(rows: FitsseySalesRow[]) {
       total += rounded;
     }
     if (total <= 0) continue;
-    normalized.set(key, { name: value.name, monthValues: roundedMonthValues });
+    const votedRates = Object.entries(value.vatRateVotes);
+    const vatRate = votedRates.length
+      ? Number(votedRates.sort((a, b) => b[1] - a[1])[0][0])
+      : 8;
+    normalized.set(key, { name: value.name, monthValues: roundedMonthValues, vatRate });
   }
   return normalized;
 }
@@ -167,7 +208,7 @@ export async function POST(request: Request) {
 
   try {
     void request;
-    const config = await resolveAuthConfig(userId);
+    const config = await resolveAuthConfig();
     const now = new Date();
 
     const startDate = config.startDate || DEFAULT_START_DATE;
@@ -176,7 +217,7 @@ export async function POST(request: Request) {
     const aggregated = aggregateRevenueByProductAndMonth(rows);
 
     if (aggregated.size === 0) {
-      await updateImportStatus(userId, "ok: 0 produktów", new Date());
+      await updateImportStatus("ok: 0 produktów", new Date());
       return NextResponse.json({ created: 0, updated: 0, products: 0 });
     }
 
@@ -186,7 +227,6 @@ export async function POST(request: Request) {
 
     const existingImported = await db.flowRow.findMany({
       where: {
-        userId,
         type: "income",
         OR: [
           { isImported: true },
@@ -210,7 +250,7 @@ export async function POST(request: Request) {
     const aggregatedEntries = [...aggregated.entries()].sort((a, b) => a[1].name.localeCompare(b[1].name, "pl", { sensitivity: "base" }));
 
     for (const [key, data] of aggregatedEntries) {
-      const { name, monthValues } = data;
+      const { name, monthValues, vatRate } = data;
       if (Object.keys(monthValues).length === 0) continue;
       seenKeys.add(key);
       const existingRows = existingByName.get(key) ?? [];
@@ -218,10 +258,11 @@ export async function POST(request: Request) {
       if (existingRows.length === 0) {
         await db.flowRow.create({
           data: {
-            userId,
+            userId: SHARED_SCOPE_ID,
             type: "income",
             name,
             isImported: true,
+            vatRate,
             amount: 0,
             startMonth: "2000-01",
             endMonth: null,
@@ -236,6 +277,7 @@ export async function POST(request: Request) {
           data: {
             name,
             isImported: true,
+            vatRate,
             amount: 0,
             startMonth: "2000-01",
             endMonth: null,
@@ -245,7 +287,7 @@ export async function POST(request: Request) {
         updated += 1;
         if (duplicates.length > 0) {
           const deleted = await db.flowRow.deleteMany({
-            where: { id: { in: duplicates.map((row) => row.id) }, userId },
+            where: { id: { in: duplicates.map((row) => row.id) } },
           });
           deletedDuplicates += deleted.count;
         }
@@ -257,7 +299,7 @@ export async function POST(request: Request) {
       .map((row) => row.id);
     if (staleRows.length > 0) {
       const deleted = await db.flowRow.deleteMany({
-        where: { id: { in: staleRows }, userId },
+        where: { id: { in: staleRows } },
       });
       deletedDuplicates += deleted.count;
     }
@@ -275,21 +317,17 @@ export async function POST(request: Request) {
       .map((row) => row.id);
     if (zeroTotalImportedIds.length > 0) {
       const deleted = await db.flowRow.deleteMany({
-        where: { id: { in: zeroTotalImportedIds }, userId },
+        where: { id: { in: zeroTotalImportedIds } },
       });
       deletedDuplicates += deleted.count;
     }
 
-    await updateImportStatus(
-      userId,
-      `ok: products=${aggregated.size}, created=${created}, updated=${updated}, removed=${deletedDuplicates}`,
-      new Date(),
-    );
+    await updateImportStatus(`ok: products=${aggregated.size}, created=${created}, updated=${updated}, removed=${deletedDuplicates}`, new Date());
 
     return NextResponse.json({ created, updated, products: aggregated.size, removed: deletedDuplicates, skipped: false });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Import failed.";
-    await updateImportStatus(userId, `error: ${message}`);
+    await updateImportStatus(`error: ${message}`);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

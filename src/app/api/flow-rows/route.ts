@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db";
+import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
 type FlowType = "income" | "expense";
 
@@ -40,7 +41,6 @@ export async function GET() {
 
   try {
     const rows = await db.flowRow.findMany({
-      where: { userId },
       orderBy: [{ type: "asc" }, { createdAt: "asc" }],
     });
 
@@ -64,6 +64,7 @@ export async function POST(request: NextRequest) {
   const endMonth = body.endMonth ? String(body.endMonth) : null;
   const monthValues = normalizeMonthValues(body.monthValues);
   const isImported = Boolean(body.isImported);
+  const vatRate = typeof body.vatRate === "number" ? body.vatRate : null;
 
   if (!name || !startMonth || (type !== "income" && type !== "expense")) {
     return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
@@ -72,10 +73,11 @@ export async function POST(request: NextRequest) {
   try {
     const row = await db.flowRow.create({
       data: {
-        userId,
+        userId: SHARED_SCOPE_ID,
         type,
         name,
         isImported,
+        vatRate,
         amount,
         startMonth,
         endMonth,
@@ -104,6 +106,7 @@ export async function PATCH(request: NextRequest) {
     startMonth?: string;
     endMonth?: string | null;
     monthValues?: MonthValues;
+    vatRate?: number | null;
   };
 
   if (!id || !patch || typeof patch !== "object") {
@@ -117,6 +120,7 @@ export async function PATCH(request: NextRequest) {
     startMonth?: string;
     endMonth?: string | null;
     monthValues?: MonthValues;
+    vatRate?: number | null;
   } = {};
 
   if (patch.type === "income" || patch.type === "expense") data.type = patch.type;
@@ -125,10 +129,11 @@ export async function PATCH(request: NextRequest) {
   if (typeof patch.startMonth === "string") data.startMonth = patch.startMonth;
   if (patch.endMonth === null || typeof patch.endMonth === "string") data.endMonth = patch.endMonth;
   if (patch.monthValues !== undefined) data.monthValues = normalizeMonthValues(patch.monthValues);
+  if (patch.vatRate === null || typeof patch.vatRate === "number") data.vatRate = patch.vatRate;
 
   try {
     const existingRow = await db.flowRow.findFirst({
-      where: { id, userId },
+      where: { id },
       select: { isImported: true },
     });
     if (!existingRow) {
@@ -142,7 +147,7 @@ export async function PATCH(request: NextRequest) {
     }
 
     const row = await db.flowRow.updateMany({
-      where: { id, userId },
+      where: { id },
       data,
     });
 
@@ -169,7 +174,7 @@ export async function DELETE(request: NextRequest) {
 
   try {
     const result = await db.flowRow.deleteMany({
-      where: { id, userId },
+      where: { id },
     });
 
     if (result.count === 0) {

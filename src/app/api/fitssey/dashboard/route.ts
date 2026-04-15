@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db";
+import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
 type SalesRow = {
   saleDate?: string;
@@ -45,13 +46,14 @@ function safeText(value: unknown) {
   return String(value ?? "").trim();
 }
 
-async function getFitsseyCredentials(userId: string) {
+async function getFitsseyCredentials() {
   const settingsDelegate = getFitsseySettingsDelegate();
   if (!settingsDelegate) {
     throw new Error("Brak delegata FitsseySettings.");
   }
 
-  const settings = await settingsDelegate.findUnique({ where: { userId } });
+  const settings = (await settingsDelegate.findUnique({ where: { userId: SHARED_SCOPE_ID } }))
+    ?? (await settingsDelegate.findFirst({ orderBy: { updatedAt: "desc" } }));
   const studioUuid = settings?.studioUuid?.trim() || process.env.FITSSEY_STUDIO_UUID?.trim() || "";
   const apiKey = settings?.apiKey?.trim() || process.env.FITSSEY_API_KEY?.trim() || "";
   const startDate = settings?.startDate ? settings.startDate.toISOString().slice(0, 10) : process.env.FITSSEY_START_DATE?.trim() || DEFAULT_START_DATE;
@@ -92,8 +94,8 @@ function mapSalesRow(row: SalesRow): SalesRecord | null {
   };
 }
 
-async function fetchSalesRecords(userId: string) {
-  const { studioUuid, apiKey, startDate } = await getFitsseyCredentials(userId);
+async function fetchSalesRecords() {
+  const { studioUuid, apiKey, startDate } = await getFitsseyCredentials();
   const endDate = new Date().toISOString().slice(0, 10);
   const baseUrl = FITSSEY_BASE_URL_TEMPLATE.replace("{uuid}", encodeURIComponent(studioUuid));
   const headers = { Accept: "application/json", Authorization: `Bearer ${apiKey}` };
@@ -444,7 +446,7 @@ export async function GET() {
   }
 
   try {
-    const records = await fetchSalesRecords(userId);
+    const records = await fetchSalesRecords();
     const analytics = buildAnalytics(records);
     return NextResponse.json(analytics);
   } catch (error) {

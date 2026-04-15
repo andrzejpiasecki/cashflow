@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db";
+import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
 const DEFAULT_START_DATE = "2025-10-01";
 
@@ -27,6 +28,14 @@ function isValidStudioUuid(value: string) {
   return /^[A-Za-z0-9_-]{2,80}$/.test(value);
 }
 
+async function getSharedSettings() {
+  const fitsseySettings = getFitsseySettingsDelegate();
+  if (!fitsseySettings) return null;
+  const shared = await fitsseySettings.findUnique({ where: { userId: SHARED_SCOPE_ID } });
+  if (shared) return shared;
+  return fitsseySettings.findFirst({ orderBy: { updatedAt: "desc" } });
+}
+
 export async function GET() {
   const { userId } = await auth();
   if (!userId) {
@@ -41,7 +50,7 @@ export async function GET() {
     );
   }
 
-  const settings = await fitsseySettings.findUnique({ where: { userId } });
+  const settings = await getSharedSettings();
   if (!settings) {
     return NextResponse.json({
       studioUuid: "",
@@ -107,16 +116,16 @@ export async function PATCH(request: NextRequest) {
     );
   }
 
-  const existing = await fitsseySettings.findUnique({ where: { userId } });
+  const existing = await getSharedSettings();
   const nextApiKey = apiKey !== undefined && apiKey.length > 0 ? apiKey : existing?.apiKey ?? null;
   if (!nextApiKey) {
     return NextResponse.json({ error: "Podaj API Key Fitssey." }, { status: 400 });
   }
 
   const saved = await fitsseySettings.upsert({
-    where: { userId },
+    where: { userId: SHARED_SCOPE_ID },
     create: {
-      userId,
+      userId: SHARED_SCOPE_ID,
       studioUuid,
       authMode: "apiKey",
       apiKey: nextApiKey,

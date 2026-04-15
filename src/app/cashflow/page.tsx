@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp } from "lucide-react";
 
 import { AppShell } from "@/components/app-shell";
 import { NumericInput } from "@/components/numeric-input";
@@ -25,6 +25,7 @@ type FlowRow = {
   type: FlowType;
   name: string;
   isImported: boolean;
+  vatRate: number | null;
   amount: number;
   startMonth: string;
   endMonth: string | null;
@@ -36,10 +37,25 @@ type MonthColumn = {
   label: string;
 };
 
+type FillModalState = {
+  rowId: string;
+  name: string;
+  amount: number;
+  startMonth: string;
+  endMonth: string;
+};
+
 const money = new Intl.NumberFormat("pl-PL", {
   style: "decimal",
   maximumFractionDigits: 0,
 });
+const EXPENSE_VAT_RATE = 23;
+const DEFAULT_FITSSEY_VAT_RATE = 8;
+
+function vatFromGross(amount: number, rate: number) {
+  if (!Number.isFinite(amount) || !Number.isFinite(rate) || amount === 0 || rate <= 0) return 0;
+  return amount * (rate / (100 + rate));
+}
 
 export default function CashflowPage() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -51,6 +67,19 @@ export default function CashflowPage() {
   const [vatRate, setVatRate] = useState(23);
   const [isLoading, setIsLoading] = useState(true);
   const [showFitsseyIncomeRows, setShowFitsseyIncomeRows] = useState(true);
+  const [fillModal, setFillModal] = useState<FillModalState | null>(null);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+
+  useEffect(() => {
+    if (!fillModal) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setConfirmDeleteOpen(false);
+      setFillModal(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [fillModal]);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("cashflow_show_fitssey_income_rows");
@@ -159,7 +188,7 @@ export default function CashflowPage() {
   const displayEndMonth = months[months.length - 1]?.key ?? currentMonthKey;
 
   const timelineMonths = useMemo(() => {
-    const candidateMonths = rows.flatMap((row) => [row.startMonth, row.endMonth, ...Object.keys(row.monthValues)]).filter(Boolean) as string[];
+    const candidateMonths = rows.flatMap((row) => Object.keys(row.monthValues));
     const earliestMonth = candidateMonths.reduce((min, month) => (monthKeyToIndex(month) < monthKeyToIndex(min) ? month : min), displayStartMonth);
     return buildMonthRange(earliestMonth, displayEndMonth);
   }, [rows, displayStartMonth, displayEndMonth]);
@@ -171,19 +200,38 @@ export default function CashflowPage() {
       return { key, income, expenses };
     });
 
-    const nonZeroHistoryIncome = actualByMonth
-      .filter((month) => month.key <= currentMonthKey)
+    const previousMonthsIncome = actualByMonth
+      .filter((month) => month.key < currentMonthKey)
       .map((month) => month.income)
-      .filter((value) => value > 0);
-    const forecastBaseline = nonZeroHistoryIncome.length > 0 ? Math.max(...nonZeroHistoryIncome) : 0;
+      .slice(-3);
+    const forecastBaseline = previousMonthsIncome.length > 0
+      ? Math.round(previousMonthsIncome.reduce((sum, value) => sum + value, 0) / previousMonthsIncome.length)
+      : 0;
 
     const computed = [];
     let cumulative = 0;
     let cumulativeNet = 0;
     let previousSettlementIndex = -1;
     const vatAccrual = actualByMonth.map((month) => {
-      const effectiveIncome = month.key > currentMonthKey ? Math.round(forecastBaseline) : month.income;
-      return effectiveIncome * (vatRate / 100) - month.expenses * (vatRate / 100);
+      const manualIncomeWithoutImported = incomeRows
+        .filter((row) => !row.isImported)
+        .reduce((sum, row) => sum + getCellValue(row, month.key), 0);
+      const importedIncome = incomeRows
+        .filter((row) => row.isImported)
+        .reduce((sum, row) => sum + getCellValue(row, month.key), 0);
+      const forecastImportedIncome = month.key > currentMonthKey ? Math.round(forecastBaseline) : importedIncome;
+      const importedOutputVat = incomeRows
+        .filter((row) => row.isImported)
+        .reduce((sum, row) => {
+          const rowValue = month.key > currentMonthKey
+            ? (importedIncome > 0 ? (getCellValue(row, month.key) / importedIncome) * forecastImportedIncome : 0)
+            : getCellValue(row, month.key);
+          const rowVatRate = row.vatRate ?? DEFAULT_FITSSEY_VAT_RATE;
+          return sum + vatFromGross(rowValue, rowVatRate);
+        }, 0);
+      const manualOutputVat = vatFromGross(manualIncomeWithoutImported, vatRate);
+      const inputVat = vatFromGross(month.expenses, EXPENSE_VAT_RATE);
+      return importedOutputVat + manualOutputVat - inputVat;
     });
 
     for (let index = 0; index < actualByMonth.length; index += 1) {
@@ -260,6 +308,7 @@ export default function CashflowPage() {
       type,
       name: type === "income" ? "Nowy przychód" : "Nowy wydatek",
       isImported: false,
+      vatRate: null,
       amount: 0,
       startMonth: todayMonth,
       endMonth: null,
@@ -284,29 +333,6 @@ export default function CashflowPage() {
     });
   };
 
-  const updateRow = (id: string, patch: Partial<FlowRow>) => {
-    let patchForServer: Partial<FlowRow> = patch;
-    const nextRows = rowsRef.current.map((row) => {
-      if (row.id !== id) return row;
-      if (row.isImported && (patch.amount !== undefined || patch.startMonth !== undefined || patch.endMonth !== undefined)) {
-        return row;
-      }
-      const shouldOverrideMonthlyEdits = patch.amount !== undefined || patch.startMonth !== undefined || patch.endMonth !== undefined;
-      if (!shouldOverrideMonthlyEdits) return { ...row, ...patch };
-      patchForServer = { ...patch, monthValues: {} };
-      return { ...row, ...patch, monthValues: {} };
-    });
-
-    rowsRef.current = nextRows;
-    setRows(nextRows);
-
-    void fetch("/api/flow-rows", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, patch: patchForServer }),
-    });
-  };
-
   const deleteRow = (id: string) => {
     const nextRows = rowsRef.current.filter((row) => row.id !== id);
     rowsRef.current = nextRows;
@@ -317,12 +343,10 @@ export default function CashflowPage() {
   const updateCellValue = (rowId: string, month: string, value: number) => {
     let patchMonthValues: Record<string, number> | null = null;
     const nextRows = rowsRef.current.map((row) => {
-      if (row.id !== rowId || !isMonthInRange(month, row.startMonth, row.endMonth)) return row;
+      if (row.id !== rowId) return row;
       if (row.isImported) return row;
-      const isBaseValue = value === row.amount;
       const nextMonthValues = { ...row.monthValues };
-      if (isBaseValue) delete nextMonthValues[month];
-      else nextMonthValues[month] = value;
+      nextMonthValues[month] = value;
       patchMonthValues = nextMonthValues;
       return { ...row, monthValues: nextMonthValues };
     });
@@ -338,51 +362,170 @@ export default function CashflowPage() {
     });
   };
 
+  const openFillModal = (row: FlowRow) => {
+    if (row.isImported) return;
+    const monthKeys = Object.keys(row.monthValues).sort();
+    const firstValueMonth = monthKeys.find((key) => (row.monthValues[key] ?? 0) !== 0) ?? months[0]?.key ?? monthKeyFromDate(new Date());
+    const lastValueMonth = [...monthKeys].reverse().find((key) => (row.monthValues[key] ?? 0) !== 0) ?? firstValueMonth;
+    const firstValue = row.monthValues[firstValueMonth] ?? 0;
+
+    setFillModal({
+      rowId: row.id,
+      name: row.name,
+      amount: firstValue,
+      startMonth: row.startMonth || firstValueMonth,
+      endMonth: row.endMonth || lastValueMonth,
+    });
+    setConfirmDeleteOpen(false);
+  };
+
+  const saveFillModal = () => {
+    if (!fillModal) return;
+    const { rowId, name, amount, startMonth, endMonth } = fillModal;
+    const from = startMonth || endMonth;
+    const to = endMonth || startMonth;
+    if (!from || !to) {
+      setFillModal(null);
+      return;
+    }
+
+    const startIndex = monthKeyToIndex(from);
+    const endIndex = monthKeyToIndex(to);
+    const rangeStart = Math.min(startIndex, endIndex);
+    const rangeEnd = Math.max(startIndex, endIndex);
+
+    let patchPayload: Partial<FlowRow> | null = null;
+    const nextRows = rowsRef.current.map((row) => {
+      if (row.id !== rowId) return row;
+      if (row.isImported) return row;
+      const nextMonthValues = { ...row.monthValues };
+      for (let index = rangeStart; index <= rangeEnd; index += 1) {
+        nextMonthValues[indexToMonthKey(index)] = amount;
+      }
+      patchPayload = {
+        name,
+        amount,
+        startMonth: indexToMonthKey(rangeStart),
+        endMonth: indexToMonthKey(rangeEnd),
+        monthValues: nextMonthValues,
+      };
+      return { ...row, ...patchPayload };
+    });
+
+    rowsRef.current = nextRows;
+    setRows(nextRows);
+    setFillModal(null);
+    setConfirmDeleteOpen(false);
+    if (!patchPayload) return;
+
+    void fetch("/api/flow-rows", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: rowId, patch: patchPayload }),
+    });
+  };
+
   return (
     <AppShell title="Cashflow" subtitle="Arkusz oparty wyłącznie na wartościach, które wpisujesz ręcznie.">
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-sm border border-slate-300 bg-white px-3 py-2">
-        <div className="flex items-center gap-2 text-xs">
-          <span className="rounded-sm border bg-white px-2 py-1">CIT: {money.format(citRate)}%</span>
-          <span className="rounded-sm border bg-white px-2 py-1">VAT: {money.format(vatRate)}%</span>
-          {isLoading && <span className="text-muted-foreground">Ładowanie danych...</span>}
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-sm border border-slate-300 bg-white px-3 py-2">
+          <div className="flex items-center gap-2 text-xs">
+            {isLoading && <span className="text-muted-foreground">Ładowanie danych...</span>}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" className="h-8 rounded-sm border bg-white px-2" onClick={() => setYearOffset((prev) => prev - 1)}>
+              <ChevronLeft className="mr-1 h-4 w-4" />
+              Poprzedni rok
+            </Button>
+            <Button variant="ghost" className="h-8 rounded-sm border bg-white px-2" onClick={() => setYearOffset((prev) => prev + 1)}>
+              Następny rok
+              <ChevronRight className="ml-1 h-4 w-4" />
+            </Button>
+            <Button variant="ghost" className="h-8 rounded-sm border bg-white px-2" onClick={() => setYearOffset(0)}>
+              Ten rok
+            </Button>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" className="h-8 rounded-sm border bg-white px-2" onClick={() => setYearOffset((prev) => prev - 1)}>
-            <ChevronLeft className="mr-1 h-4 w-4" />
-            Poprzedni rok
-          </Button>
-          <Button variant="ghost" className="h-8 rounded-sm border bg-white px-2" onClick={() => setYearOffset((prev) => prev + 1)}>
-            Następny rok
-            <ChevronRight className="ml-1 h-4 w-4" />
-          </Button>
-          <Button variant="ghost" className="h-8 rounded-sm border bg-white px-2" onClick={() => setYearOffset(0)}>
-            Ten rok
-          </Button>
-        </div>
-      </div>
 
-      <div className="overflow-x-hidden rounded-sm border border-slate-300 bg-white">
-        <Table className="w-full table-fixed border-collapse text-xs tabular-nums">
-          <TableHeader>
-            <TableRow className="hover:bg-transparent">
-              <TableHead className="sticky top-0 z-20 w-[170px] border border-slate-300 bg-slate-100">Nazwa</TableHead>
-              <TableHead className="sticky top-0 z-20 w-[100px] border border-slate-300 bg-slate-100 text-right">Kwota</TableHead>
-              <TableHead className="sticky top-0 z-20 w-[130px] border border-slate-300 bg-slate-100">Od</TableHead>
-              <TableHead className="sticky top-0 z-20 w-[130px] border border-slate-300 bg-slate-100">Do</TableHead>
-              {months.map((month) => (
-                <TableHead key={month.key} className="sticky top-0 z-20 w-[84px] border border-slate-300 bg-slate-100 text-right">
-                  {month.label}
-                </TableHead>
-              ))}
-              <TableHead className="sticky top-0 z-20 w-[110px] border border-slate-300 bg-slate-100 text-right">Suma</TableHead>
-              <TableHead className="sticky top-0 z-20 w-[56px] border border-slate-300 bg-slate-100 text-right">Akcja</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
+        <div className="space-y-2 lg:hidden">
+          <div className="rounded-sm border border-slate-300 bg-white p-3">
+            <p className="text-xs font-semibold text-slate-700">
+              Widok mobilny: podsumowanie (edycja dostępna na desktopie)
+            </p>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+              <div className="rounded-sm border border-slate-200 bg-slate-50 px-2 py-1">
+                <p className="text-slate-500">Przychody (rok)</p>
+                <p className="font-semibold text-emerald-700">{money.format(effectiveMonthlyTotals.reduce((sum, v) => sum + v.income, 0))}</p>
+              </div>
+              <div className="rounded-sm border border-slate-200 bg-slate-50 px-2 py-1">
+                <p className="text-slate-500">Wydatki (rok)</p>
+                <p className="font-semibold text-rose-700">{money.format(effectiveMonthlyTotals.reduce((sum, v) => sum + v.expenses, 0))}</p>
+              </div>
+              <div className="rounded-sm border border-slate-200 bg-slate-50 px-2 py-1">
+                <p className="text-slate-500">Saldo (rok)</p>
+                <p className="font-semibold">{money.format(effectiveMonthlyTotals.reduce((sum, v) => sum + v.balance, 0))}</p>
+              </div>
+              <div className="rounded-sm border border-slate-200 bg-slate-50 px-2 py-1">
+                <p className="text-slate-500">Stan po podatkach</p>
+                <p className="font-semibold">{money.format(cumulativeNetAfterTax.at(-1)?.value ?? 0)}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {months.map((month, index) => {
+              const monthly = effectiveMonthlyTotals[index];
+              const cumulative = cumulativeBalances[index]?.value ?? 0;
+              const cumulativeNet = cumulativeNetAfterTax[index]?.value ?? 0;
+              const taxes = taxTotals[index];
+              const forecast = forecastIncomeTotals[index] ?? 0;
+              return (
+                <div key={month.key} className="rounded-sm border border-slate-300 bg-white p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold">{month.label}</h3>
+                    <span className="text-xs text-slate-500">Saldo: {money.format(monthly?.balance ?? 0)}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                    <span className="text-slate-500">Przychody</span>
+                    <span className="text-right text-emerald-700">{money.format(monthly?.income ?? 0)}</span>
+                    <span className="text-slate-500">Prognoza auto</span>
+                    <span className="text-right text-blue-700">{money.format(forecast)}</span>
+                    <span className="text-slate-500">Wydatki</span>
+                    <span className="text-right text-rose-700">{money.format(monthly?.expenses ?? 0)}</span>
+                    <span className="text-slate-500">CIT</span>
+                    <span className="text-right text-amber-700">{money.format(taxes?.cit ?? 0)}</span>
+                    <span className="text-slate-500">VAT (kwartał)</span>
+                    <span className="text-right">{money.format(taxes?.vatPayment ?? 0)}</span>
+                    <span className="text-slate-500">Stan skumulowany</span>
+                    <span className="text-right">{money.format(cumulative)}</span>
+                    <span className="text-slate-500">Stan po podatkach</span>
+                    <span className="text-right">{money.format(cumulativeNet)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="hidden overflow-x-hidden rounded-sm border border-slate-300 bg-white lg:block">
+          <Table className="w-full table-fixed border-collapse text-xs tabular-nums">
+            <CashflowColGroup months={months} />
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="border border-slate-300 bg-slate-100">Nazwa</TableHead>
+                {months.map((month) => (
+                  <TableHead key={month.key} className="border border-slate-300 bg-slate-100 px-1 text-right text-[10px] sm:text-xs">
+                    {month.label}
+                  </TableHead>
+                ))}
+                <TableHead className="border border-slate-300 bg-slate-100 text-right">Suma</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
             <SectionHeader title="PRZYCHODY" />
             {visibleImportedIncomeRows.length > 0 && (
               <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={months.length + 6} className="border border-slate-300 p-0">
+                <TableCell colSpan={months.length + 2} className="border border-slate-300 p-0">
                   <Button
                     variant="ghost"
                     className="h-8 w-full justify-between rounded-none bg-slate-50 px-2 text-xs text-slate-700 hover:bg-slate-100"
@@ -396,36 +539,163 @@ export default function CashflowPage() {
             )}
             {showFitsseyIncomeRows &&
               visibleImportedIncomeRows.map((row) => (
-                <SpreadsheetRow key={row.id} row={row} months={months} onUpdate={updateRow} onUpdateCell={updateCellValue} onDelete={deleteRow} />
+                <SpreadsheetRow
+                  key={row.id}
+                  row={row}
+                  months={months}
+                  onUpdateCell={updateCellValue}
+                  onOpenFillModal={openFillModal}
+                />
               ))}
             {manualIncomeRows.map((row) => (
-              <SpreadsheetRow key={row.id} row={row} months={months} onUpdate={updateRow} onUpdateCell={updateCellValue} onDelete={deleteRow} />
+              <SpreadsheetRow
+                key={row.id}
+                row={row}
+                months={months}
+                onUpdateCell={updateCellValue}
+                onOpenFillModal={openFillModal}
+              />
             ))}
-            <SectionAddRow label="+ Dodaj przychód" onClick={() => addRow("income")} colSpan={months.length + 6} />
+            <SectionAddRow label="+ Dodaj przychód" onClick={() => addRow("income")} colSpan={months.length + 2} />
 
             <SectionHeader title="WYDATKI" />
             {expenseRows.map((row) => (
-              <SpreadsheetRow key={row.id} row={row} months={months} onUpdate={updateRow} onUpdateCell={updateCellValue} onDelete={deleteRow} />
+              <SpreadsheetRow
+                key={row.id}
+                row={row}
+                months={months}
+                onUpdateCell={updateCellValue}
+                onOpenFillModal={openFillModal}
+              />
             ))}
-            <SectionAddRow label="+ Dodaj wydatek" onClick={() => addRow("expense")} colSpan={months.length + 6} />
-          </TableBody>
-          <TableFooter className="bg-white">
-            <SummaryRow label="Miesięczne przychody" values={effectiveMonthlyTotals.map((v) => v.income)} textClass="text-emerald-700" />
-            <SummaryRow label="Prognoza przychodów (auto)" values={forecastIncomeTotals} textClass="text-blue-700" />
-            <SummaryRow label="Miesięczne wydatki" values={effectiveMonthlyTotals.map((v) => v.expenses)} textClass="text-rose-700" />
-            <SummaryRow label="Miesięczne saldo" values={effectiveMonthlyTotals.map((v) => v.balance)} />
-            <SummaryRow label="Stan skumulowany" values={cumulativeBalances.map((v) => v.value)} totalMode="last" />
-            <SummaryRow label="Podatek dochodowy spółki (CIT)" values={taxTotals.map((v) => v.cit)} textClass="text-amber-700" />
-            <SummaryRow
-              label="VAT płatny kwartalnie"
-              values={taxTotals.map((v) => v.vatPayment)}
-              valueClassBySign
-            />
-            <SummaryRow label="Stan skumulowany po podatkach" values={cumulativeNetAfterTax.map((v) => v.value)} totalMode="last" />
-          </TableFooter>
-        </Table>
+            <SectionAddRow label="+ Dodaj wydatek" onClick={() => addRow("expense")} colSpan={months.length + 2} />
+            </TableBody>
+            <TableFooter className="bg-white">
+              <SummaryRow label="Miesięczne przychody" values={effectiveMonthlyTotals.map((v) => v.income)} textClass="text-emerald-700" />
+              <SummaryRow label="Prognoza przychodów (auto)" values={forecastIncomeTotals} textClass="text-blue-700" />
+              <SummaryRow label="Miesięczne wydatki" values={effectiveMonthlyTotals.map((v) => v.expenses)} textClass="text-rose-700" />
+              <SummaryRow label="Miesięczne saldo" values={effectiveMonthlyTotals.map((v) => v.balance)} />
+              <SummaryRow label="Stan skumulowany" values={cumulativeBalances.map((v) => v.value)} totalMode="last" />
+              <SummaryRow label="Podatek dochodowy spółki (CIT)" values={taxTotals.map((v) => v.cit)} textClass="text-amber-700" />
+              <SummaryRow
+                label="VAT płatny kwartalnie"
+                values={taxTotals.map((v) => v.vatPayment)}
+                valueClassBySign
+              />
+              <SummaryRow label="Stan skumulowany po podatkach" values={cumulativeNetAfterTax.map((v) => v.value)} totalMode="last" />
+            </TableFooter>
+          </Table>
+        </div>
       </div>
+
+      {fillModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+          <div className="w-full max-w-md rounded-sm border border-slate-300 bg-white p-4 shadow-lg">
+            <h3 className="text-sm font-semibold">Wypełnij zakres</h3>
+            <p className="mt-1 text-xs text-muted-foreground">Wartość zostanie wpisana do komórek w wybranym przedziale miesięcy.</p>
+            <div className="mt-3 space-y-2">
+              <div>
+                <label className="mb-1 block text-xs font-medium">Nazwa</label>
+                <Input value={fillModal.name} onChange={(event) => setFillModal((prev) => (prev ? { ...prev, name: event.target.value } : prev))} className="h-9 text-sm" />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium">Kwota</label>
+                <NumericInput
+                  value={fillModal.amount}
+                  onValueChange={(value) => setFillModal((prev) => (prev ? { ...prev, amount: value } : prev))}
+                  className="h-9 text-sm"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="mb-1 block text-xs font-medium">Od</label>
+                  <Input
+                    type="month"
+                    value={fillModal.startMonth}
+                    onChange={(event) => setFillModal((prev) => (prev ? { ...prev, startMonth: event.target.value } : prev))}
+                    className="h-9 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium">Do</label>
+                  <Input
+                    type="month"
+                    value={fillModal.endMonth}
+                    onChange={(event) => setFillModal((prev) => (prev ? { ...prev, endMonth: event.target.value } : prev))}
+                    className="h-9 text-sm"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <div className="relative">
+                {confirmDeleteOpen && (
+                  <div className="absolute bottom-full right-0 z-30 mb-2 w-56 rounded-sm border border-slate-300 bg-white p-3 text-xs shadow-[0_12px_24px_rgba(15,23,42,0.16)]">
+                    <p className="flex items-center gap-2 text-[13px] font-medium text-slate-800">
+                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-400 text-[11px] font-bold leading-none text-white">!</span>
+                      Usunąć tę pozycję?
+                    </p>
+                    <div className="mt-3 flex justify-end gap-2">
+                      <Button
+                        variant="ghost"
+                        className="h-7 rounded-sm border border-slate-300 bg-white px-3 text-xs text-slate-700 hover:bg-slate-50"
+                        onClick={() => setConfirmDeleteOpen(false)}
+                      >
+                        Nie
+                      </Button>
+                      <Button
+                        className="h-7 rounded-sm border border-rose-300 bg-rose-50 px-3 text-xs text-rose-700 hover:bg-rose-100"
+                        onClick={() => {
+                          deleteRow(fillModal.rowId);
+                          setConfirmDeleteOpen(false);
+                          setFillModal(null);
+                        }}
+                      >
+                        Tak
+                      </Button>
+                    </div>
+                    <div className="pointer-events-none absolute -bottom-2 right-8 h-0 w-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-slate-300" />
+                    <div className="pointer-events-none absolute -bottom-[7px] right-[33px] h-0 w-0 border-l-[7px] border-r-[7px] border-t-[7px] border-l-transparent border-r-transparent border-t-white" />
+                  </div>
+                )}
+                <Button
+                  variant="ghost"
+                  className="h-8 rounded-sm border border-rose-200 bg-rose-50 px-3 text-rose-700 hover:bg-rose-100"
+                  onClick={() => setConfirmDeleteOpen((prev) => !prev)}
+                >
+                  Usuń pozycję
+                </Button>
+              </div>
+              <Button
+                variant="ghost"
+                className="h-8 rounded-sm border bg-white px-3"
+                onClick={() => {
+                  setConfirmDeleteOpen(false);
+                  setFillModal(null);
+                }}
+              >
+                Anuluj
+              </Button>
+              <Button className="h-8 rounded-sm px-3" onClick={saveFillModal}>
+                Zapisz
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </AppShell>
+  );
+}
+
+function CashflowColGroup({ months }: { months: MonthColumn[] }) {
+  return (
+    <colgroup>
+      <col style={{ width: "28.5%" }} />
+      {months.map((month) => (
+        <col key={`col-${month.key}`} style={{ width: "5.5%" }} />
+      ))}
+      <col style={{ width: "5.5%" }} />
+    </colgroup>
   );
 }
 
@@ -445,7 +715,7 @@ function SummaryRow({
   const total = totalMode === "last" ? (values.at(-1) ?? 0) : values.reduce((sum, value) => sum + value, 0);
   return (
     <TableRow className="hover:bg-transparent">
-      <TableCell colSpan={4} className="border border-slate-300 bg-slate-50 text-xs font-semibold">
+      <TableCell className="border border-slate-300 bg-slate-50 text-xs font-semibold">
         {label}
       </TableCell>
       {values.map((value, index) => (
@@ -459,7 +729,6 @@ function SummaryRow({
         </TableCell>
       ))}
       <TableCell className="border border-slate-300 bg-slate-50 text-right text-xs font-semibold">{money.format(total)}</TableCell>
-      <TableCell className="border border-slate-300 bg-slate-50" />
     </TableRow>
   );
 }
@@ -467,12 +736,11 @@ function SummaryRow({
 type SpreadsheetRowProps = {
   row: FlowRow;
   months: MonthColumn[];
-  onUpdate: (id: string, patch: Partial<FlowRow>) => void;
   onUpdateCell: (rowId: string, month: string, value: number) => void;
-  onDelete: (id: string) => void;
+  onOpenFillModal: (row: FlowRow) => void;
 };
 
-function SpreadsheetRow({ row, months, onUpdate, onUpdateCell, onDelete }: SpreadsheetRowProps) {
+function SpreadsheetRow({ row, months, onUpdateCell, onOpenFillModal }: SpreadsheetRowProps) {
   const rowTotal = months.reduce((sum, month) => sum + getCellValue(row, month.key), 0);
   const toneClass = row.type === "income" ? "text-emerald-700" : "text-rose-700";
   const readOnlyImported = row.isImported;
@@ -480,78 +748,33 @@ function SpreadsheetRow({ row, months, onUpdate, onUpdateCell, onDelete }: Sprea
   return (
     <TableRow className="hover:bg-transparent">
       <TableCell className="border border-slate-300 p-0">
-        {readOnlyImported ? (
-          <div className="flex h-8 items-center px-2 text-xs">{row.name}</div>
-        ) : (
-          <Input
-            value={row.name}
-            onChange={(event) => onUpdate(row.id, { name: event.target.value })}
-            className="h-8 rounded-none border-0 bg-transparent text-xs"
-          />
-        )}
-      </TableCell>
-      <TableCell className="border border-slate-300 p-0">
-        {readOnlyImported ? (
-          <div className="h-8" />
-        ) : (
-          <NumericInput value={row.amount} onValueChange={(value) => onUpdate(row.id, { amount: value })} className="h-8 rounded-none border-0 bg-transparent pr-1 text-right text-xs" />
-        )}
-      </TableCell>
-      <TableCell className="border border-slate-300 p-0">
-        {readOnlyImported ? (
-          <div className="h-8" />
-        ) : (
-          <Input
-            type="date"
-            value={`${row.startMonth}-01`}
-            onChange={(event) => onUpdate(row.id, { startMonth: event.target.value.slice(0, 7) })}
-            className="h-8 rounded-none border-0 bg-transparent pr-1 text-xs"
-          />
-        )}
-      </TableCell>
-      <TableCell className="border border-slate-300 p-0">
-        {readOnlyImported ? (
-          <div className="h-8" />
-        ) : (
-          <Input
-            type="date"
-            value={row.endMonth ? `${row.endMonth}-01` : ""}
-            onChange={(event) => onUpdate(row.id, { endMonth: event.target.value ? event.target.value.slice(0, 7) : null })}
-            className={`h-8 rounded-none border-0 bg-transparent pr-1 text-xs ${row.endMonth ? "" : "date-empty"}`}
-          />
-        )}
+        <button
+          type="button"
+          className={`flex h-8 w-full items-center px-2 text-left text-xs ${readOnlyImported ? "cursor-default" : "hover:bg-slate-50"}`}
+          onClick={() => {
+            if (!readOnlyImported) onOpenFillModal(row);
+          }}
+        >
+          {row.name}
+        </button>
       </TableCell>
       {months.map((month) => {
         const value = getCellValue(row, month.key);
-        const enabled = isMonthInRange(month.key, row.startMonth, row.endMonth);
         return (
           <TableCell key={month.key} className="border border-slate-300 p-0">
-            {enabled ? (
-              readOnlyImported ? (
-                <div className="flex h-8 items-center justify-end px-2 text-xs">{money.format(value)}</div>
-              ) : (
-                <NumericInput
-                  value={value}
-                  onValueChange={(nextValue) => onUpdateCell(row.id, month.key, nextValue)}
-                  className="h-8 rounded-none border-0 bg-transparent px-1 text-right text-xs"
-                />
-              )
+            {readOnlyImported ? (
+              <div className="flex h-8 items-center justify-end px-2 text-xs">{money.format(value)}</div>
             ) : (
-              <Input value="" placeholder="—" disabled className="h-8 rounded-none border-0 bg-transparent px-1 text-right text-xs text-slate-300" />
+              <NumericInput
+                value={value}
+                onValueChange={(nextValue) => onUpdateCell(row.id, month.key, nextValue)}
+                className="h-8 rounded-none border-0 bg-transparent px-1 text-right text-xs"
+              />
             )}
           </TableCell>
         );
       })}
       <TableCell className={`border border-slate-300 text-right text-xs font-semibold ${toneClass}`}>{money.format(rowTotal)}</TableCell>
-      <TableCell className="border border-slate-300 p-0 text-right">
-        {readOnlyImported ? (
-          <div className="h-8" />
-        ) : (
-          <Button variant="ghost" className="h-8 w-full rounded-none px-0 text-muted-foreground hover:bg-rose-50 hover:text-rose-700" onClick={() => onDelete(row.id)}>
-            <Trash2 className="h-4 w-4" />
-          </Button>
-        )}
-      </TableCell>
     </TableRow>
   );
 }
@@ -579,10 +802,8 @@ function SectionAddRow({ label, onClick, colSpan }: { label: string; onClick: ()
 }
 
 function getCellValue(row: FlowRow, month: string) {
-  const enabled = isMonthInRange(month, row.startMonth, row.endMonth);
-  if (!enabled) return 0;
-  const override = row.monthValues[month];
-  return override === undefined ? row.amount : override;
+  const value = row.monthValues[month];
+  return typeof value === "number" ? value : 0;
 }
 
 function monthKeyFromDate(date: Date) {
@@ -601,13 +822,6 @@ function getYearMonthsWindow(yearOffset: number): MonthColumn[] {
 function isQuarterSettlementMonth(monthKey: string) {
   const monthNumber = Number(monthKey.split("-")[1]);
   return monthNumber % 3 === 0;
-}
-
-function isMonthInRange(monthKey: string, startMonthKey: string, endMonthKey: string | null) {
-  const monthIndex = monthKeyToIndex(monthKey);
-  const startIndex = monthKeyToIndex(startMonthKey);
-  const endIndex = endMonthKey ? monthKeyToIndex(endMonthKey) : Number.POSITIVE_INFINITY;
-  return monthIndex >= startIndex && monthIndex <= endIndex;
 }
 
 function monthKeyToIndex(monthKey: string) {

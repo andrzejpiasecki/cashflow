@@ -31,6 +31,7 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api/")) return;
+  if (url.pathname.startsWith("/_next/")) return;
 
   if (request.mode === "navigate") {
     // Never cache auth-sensitive HTML navigations; let Clerk/Next resolve them live.

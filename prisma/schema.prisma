@@ -34,6 +34,7 @@ model FlowRow {
   type       FlowType
   name       String
   isImported Boolean  @default(false)
+  vatRate    Float?
   amount     Float
   startMonth String
   endMonth   String?
