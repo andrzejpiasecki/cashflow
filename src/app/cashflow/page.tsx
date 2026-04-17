@@ -389,14 +389,15 @@ export default function CashflowPage() {
     () =>
       months.map((month) => {
         const computed = timelineComputed.get(month.key);
+        const actualIncome = incomeRows.reduce((sum, row) => sum + getCellValue(row, month.key), 0);
         return {
           key: month.key,
-          income: computed?.income ?? 0,
+          income: month.key === currentMonthKey ? actualIncome : computed?.income ?? 0,
           expenses: computed?.expenses ?? 0,
           balance: computed?.balance ?? 0,
         };
       }),
-    [months, timelineComputed],
+    [months, timelineComputed, incomeRows, currentMonthKey],
   );
 
   const forecastIncomeTotals = useMemo(
