@@ -25,7 +25,7 @@ function createPrismaClient() {
 const hasRequiredDelegates = (client: PrismaClient | undefined) => {
   if (!client) return false;
   const c = client as unknown as Record<string, unknown>;
-  return "flowRow" in c && "fitsseySettings" in c;
+  return "flowRow" in c && "fitsseySettings" in c && "fitsseyClient" in c;
 };
 
 export const db = hasRequiredDelegates(globalForPrisma.prisma)

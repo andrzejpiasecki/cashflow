@@ -101,7 +101,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <AppShell title="Settings" subtitle="Konfiguracja integracji Fitssey i automatycznego importu przychodów.">
+    <AppShell title="Settings">
       <div className="rounded-sm border border-slate-300 bg-white p-4 text-sm">
         {isLoading ? (
           <p className="text-muted-foreground">Ładowanie ustawień...</p>

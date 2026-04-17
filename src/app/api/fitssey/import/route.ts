@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db";
+import { syncFitsseyClientsCache } from "@/lib/fitssey-clients";
 import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
 type FitsseyAuthMode = "apiKey";
@@ -207,14 +208,40 @@ export async function POST(request: Request) {
   }
 
   try {
-    void request;
+    const body = (await request.json().catch(() => ({}))) as { auto?: boolean };
+    const isAutoImport = body.auto === true;
     const config = await resolveAuthConfig();
     const now = new Date();
+    const settings = (await db.fitsseySettings.findUnique({ where: { userId: SHARED_SCOPE_ID } }))
+      ?? (await db.fitsseySettings.findFirst({ orderBy: { updatedAt: "desc" } }));
+
+    if (isAutoImport && settings?.lastImportedAt) {
+      const cooldownMinutes = Math.max(30, settings.autoImportIntervalMins || 180);
+      const cooldownMs = cooldownMinutes * 60 * 1000;
+      const elapsedMs = Date.now() - settings.lastImportedAt.getTime();
+      if (elapsedMs < cooldownMs) {
+        const nextImportAt = new Date(settings.lastImportedAt.getTime() + cooldownMs);
+        return NextResponse.json({
+          skipped: true,
+          reason: "cooldown",
+          nextImportAt: nextImportAt.toISOString(),
+          cooldownMinutes,
+        });
+      }
+    }
 
     const startDate = config.startDate || DEFAULT_START_DATE;
     const endDate = now.toISOString().slice(0, 10);
     const rows = await fetchSalesRows(config, startDate, endDate);
     const aggregated = aggregateRevenueByProductAndMonth(rows);
+    let clientsSyncInfo = "";
+    try {
+      const clientsSync = await syncFitsseyClientsCache(config.studioUuid, config.apiKey);
+      clientsSyncInfo = `, clients=${clientsSync.upserted}`;
+    } catch (error) {
+      clientsSyncInfo = ", clients=sync_error";
+      console.error("Fitssey clients cache sync failed:", error);
+    }
 
     if (aggregated.size === 0) {
       await updateImportStatus("ok: 0 produktów", new Date());
@@ -322,7 +349,7 @@ export async function POST(request: Request) {
       deletedDuplicates += deleted.count;
     }
 
-    await updateImportStatus(`ok: products=${aggregated.size}, created=${created}, updated=${updated}, removed=${deletedDuplicates}`, new Date());
+    await updateImportStatus(`ok: products=${aggregated.size}, created=${created}, updated=${updated}, removed=${deletedDuplicates}${clientsSyncInfo}`, new Date());
 
     return NextResponse.json({ created, updated, products: aggregated.size, removed: deletedDuplicates, skipped: false });
   } catch (error) {

@@ -65,3 +65,23 @@ model FitsseySettings {
 
   @@index([userId])
 }
+
+model FitsseyClient {
+  id             String   @id @default(cuid())
+  userId         String
+  externalGuid   String
+  clientUuid     String?
+  fullName       String
+  normalizedName String
+  email          String?
+  phone          String?
+  activeEntries  Int?
+  entriesSource  String?
+  entriesUpdatedAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([userId, externalGuid])
+  @@index([userId, clientUuid])
+  @@index([userId, normalizedName])
+}

@@ -68,6 +68,11 @@ export default function CashflowPage() {
   const [rows, setRows] = useState<FlowRow[]>([]);
   const rowsRef = useRef<FlowRow[]>([]);
   const isSyncingRef = useRef(false);
+  const lastAutoSyncAttemptRef = useRef(0);
+  const desktopTableScrollRef = useRef<HTMLDivElement | null>(null);
+  const hasAutoScrolledToCurrentMonthRef = useRef(false);
+  const mobileMonthCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const hasAutoScrolledToCurrentMonthMobileRef = useRef(false);
   const [yearOffset, setYearOffset] = useState(0);
   const [citRate, setCitRate] = useState(19);
   const [vatRate, setVatRate] = useState(23);
@@ -139,6 +144,9 @@ export default function CashflowPage() {
 
     const backgroundSync = async () => {
       if (isSyncingRef.current) return;
+      const nowMs = Date.now();
+      if (nowMs - lastAutoSyncAttemptRef.current < 30_000) return;
+      lastAutoSyncAttemptRef.current = nowMs;
       isSyncingRef.current = true;
       try {
         await fetch("/api/fitssey/import", {
@@ -519,8 +527,48 @@ export default function CashflowPage() {
     });
   };
 
+  useEffect(() => {
+    hasAutoScrolledToCurrentMonthRef.current = false;
+    hasAutoScrolledToCurrentMonthMobileRef.current = false;
+  }, [yearOffset]);
+
+  useEffect(() => {
+    if (isLoading) return;
+    if (hasAutoScrolledToCurrentMonthRef.current) return;
+    const container = desktopTableScrollRef.current;
+    if (!container) return;
+
+    const target = container.querySelector<HTMLElement>(`[data-month-key="${currentMonthKey}"]`);
+    if (!target) return;
+
+    hasAutoScrolledToCurrentMonthRef.current = true;
+    requestAnimationFrame(() => {
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const centerOffset = targetRect.left - containerRect.left - (containerRect.width / 2 - targetRect.width / 2);
+      container.scrollTo({
+        left: Math.max(0, container.scrollLeft + centerOffset),
+        behavior: "smooth",
+      });
+    });
+  }, [currentMonthKey, isLoading]);
+
+  useEffect(() => {
+    if (isLoading) return;
+    if (hasAutoScrolledToCurrentMonthMobileRef.current) return;
+    if (typeof window === "undefined") return;
+    if (window.matchMedia("(min-width: 1024px)").matches) return;
+    const target = mobileMonthCardRefs.current[currentMonthKey];
+    if (!target) return;
+
+    hasAutoScrolledToCurrentMonthMobileRef.current = true;
+    requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, [currentMonthKey, isLoading, months]);
+
   return (
-    <AppShell title="Cashflow" subtitle="Arkusz oparty wyłącznie na wartościach, które wpisujesz ręcznie.">
+    <AppShell title="Cashflow">
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-sm border border-slate-300 bg-white px-3 py-2">
           <div className="flex items-center gap-2 text-xs">
@@ -573,11 +621,21 @@ export default function CashflowPage() {
               const cumulativeNet = cumulativeNetAfterTax[index]?.value ?? 0;
               const taxes = taxTotals[index];
               const forecast = forecastIncomeTotals[index] ?? 0;
+              const isCurrentMonth = month.key === currentMonthKey;
               return (
-                <div key={month.key} className="rounded-sm border border-slate-300 bg-white p-3">
+                <div
+                  key={month.key}
+                  ref={(element) => {
+                    mobileMonthCardRefs.current[month.key] = element;
+                  }}
+                  className={`rounded-sm bg-white p-3 ${isCurrentMonth ? "border-2 border-slate-950" : "border border-slate-200"}`}
+                  style={isCurrentMonth ? { borderColor: "#475569" } : undefined}
+                >
                   <div className="mb-2 flex items-center justify-between">
                     <h3 className="text-sm font-semibold">{month.label}</h3>
-                    <span className="text-xs text-slate-500">Saldo: {money.format(monthly?.balance ?? 0)}</span>
+                    <span className={`text-xs font-bold ${((monthly?.balance ?? 0) >= 0) ? "text-emerald-700" : "text-rose-700"}`}>
+                      Saldo: {money.format(monthly?.balance ?? 0)}
+                    </span>
                   </div>
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
                     <span className="text-slate-500">Przychody</span>
@@ -653,7 +711,7 @@ export default function CashflowPage() {
           </div>
         </div>
 
-        <div className="hidden overflow-x-hidden rounded-sm border border-slate-300 bg-white lg:block">
+        <div ref={desktopTableScrollRef} className="hidden overflow-x-auto rounded-sm border border-slate-300 bg-white lg:block">
           <Table className="w-full table-fixed border-collapse text-xs tabular-nums">
             <CashflowColGroup months={months} />
             <TableHeader>
@@ -662,8 +720,9 @@ export default function CashflowPage() {
                 {months.map((month) => (
                   <TableHead
                     key={month.key}
+                    data-month-key={month.key}
                     className={`border px-1 text-right text-[10px] sm:text-xs ${
-                      month.key === currentMonthKey ? "border-blue-300 bg-blue-50 text-blue-800" : "border-slate-300 bg-slate-100"
+                      month.key === currentMonthKey ? "border-slate-300 bg-slate-200 font-bold text-slate-950" : "border-slate-300 bg-slate-100"
                     }`}
                   >
                     {month.label}
@@ -728,7 +787,13 @@ export default function CashflowPage() {
               <SummaryRow label="Miesięczne przychody" values={effectiveMonthlyTotals.map((v) => v.income)} textClass="text-emerald-700" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
               <SummaryRow label="Prognoza przychodów (auto)" values={forecastIncomeTotals} textClass="text-blue-700" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
               <SummaryRow label="Miesięczne wydatki" values={effectiveMonthlyTotals.map((v) => v.expenses)} textClass="text-rose-700" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
-              <SummaryRow label="Miesięczne saldo" values={effectiveMonthlyTotals.map((v) => v.balance)} currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
+              <SummaryRow
+                label="Miesięczne saldo"
+                values={effectiveMonthlyTotals.map((v) => v.balance)}
+                emphasis
+                currentMonthKey={currentMonthKey}
+                monthKeys={months.map((m) => m.key)}
+              />
               <SummaryRow label="Stan skumulowany" values={cumulativeBalances.map((v) => v.value)} totalMode="last" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
               <SummaryRow
                 label={(
@@ -984,6 +1049,7 @@ function SummaryRow({
   values,
   textClass,
   valueClassBySign,
+  emphasis = false,
   totalMode = "sum",
   currentMonthKey,
   monthKeys,
@@ -992,6 +1058,7 @@ function SummaryRow({
   values: number[];
   textClass?: string;
   valueClassBySign?: boolean;
+  emphasis?: boolean;
   totalMode?: "sum" | "last";
   currentMonthKey?: string;
   monthKeys?: string[];
@@ -999,14 +1066,14 @@ function SummaryRow({
   const total = totalMode === "last" ? (values.at(-1) ?? 0) : values.reduce((sum, value) => sum + value, 0);
   return (
     <TableRow className="hover:bg-transparent">
-      <TableCell className="border border-slate-300 bg-slate-50 text-xs font-semibold">
+      <TableCell className={`border border-slate-300 text-xs ${emphasis ? "bg-slate-100 font-bold text-slate-900" : "bg-slate-50 font-semibold"}`}>
         {label}
       </TableCell>
       {values.map((value, index) => (
         <TableCell
           key={index}
-          className={`border text-right text-xs font-semibold ${
-            monthKeys?.[index] === currentMonthKey ? "border-blue-300 bg-blue-50" : "border-slate-300"
+          className={`border text-right text-xs ${emphasis ? "font-bold" : "font-semibold"} ${
+            monthKeys?.[index] === currentMonthKey ? (emphasis ? "border-slate-300 bg-slate-200" : "border-slate-300 bg-slate-100") : "border-slate-300"
           } ${
             valueClassBySign ? (value >= 0 ? "text-amber-700" : "text-emerald-700") : textClass ?? (value >= 0 ? "text-emerald-700" : "text-rose-700")
           }`}
@@ -1014,7 +1081,9 @@ function SummaryRow({
           {money.format(value)}
         </TableCell>
       ))}
-      <TableCell className="border border-slate-300 bg-slate-50 text-right text-xs font-semibold">{money.format(total)}</TableCell>
+      <TableCell className={`border border-slate-300 text-right text-xs ${emphasis ? "bg-slate-100 font-bold text-slate-900" : "bg-slate-50 font-semibold"}`}>
+        {money.format(total)}
+      </TableCell>
     </TableRow>
   );
 }
@@ -1048,7 +1117,7 @@ function SpreadsheetRow({ row, months, currentMonthKey, onUpdateCell, onOpenFill
       {months.map((month) => {
         const value = getCellValue(row, month.key);
         return (
-          <TableCell key={month.key} className={`border p-0 ${month.key === currentMonthKey ? "border-blue-300 bg-blue-50/40" : "border-slate-300"}`}>
+          <TableCell key={month.key} className={`border p-0 ${month.key === currentMonthKey ? "border-slate-300 bg-slate-100/80" : "border-slate-300"}`}>
             {readOnlyImported ? (
               <div className="flex h-8 items-center justify-end px-2 text-xs">{money.format(value)}</div>
             ) : (

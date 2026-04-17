@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, LabelList, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { AppShell } from "@/components/app-shell";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 type DashboardPayload = {
+  studioUuid?: string;
   months: string[];
   latestMonth: string | null;
   latestMrr: number;
@@ -27,18 +28,19 @@ type DashboardPayload = {
   dailyRevenue: { labels: string[]; values: number[]; previousValues: number[] };
   contacts: {
     name: string;
+    clientGuid: string | null;
     lastPurchaseDate: string;
     daysSinceLastPurchase: number;
     lastPassPurchaseDate: string | null;
     daysSinceLastPass: number | null;
     expectedCycleDays: number | null;
     lifetimeRevenue: number;
+    email: string | null;
+    phone: string | null;
     reason: string;
     score: number;
     priority: string;
   }[];
-  newClientSales: { month: string; date: string; clientName: string; product: string; amount: number; monthLinkStatus: string }[];
-  returningClientSales: { month: string; date: string; clientName: string; product: string; amount: number; monthLinkStatus: string }[];
   clientsSummary: { name: string; purchaseCount: number; totalAmount: number; purchasesByMonth: Record<string, number> }[];
   error?: string;
 };
@@ -56,6 +58,15 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 767px)");
+    const update = () => setIsMobile(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   useEffect(() => {
     const load = async () => {
@@ -89,14 +100,6 @@ export default function DashboardPage() {
     }));
   }, [data]);
 
-  const productsData = useMemo(() => {
-    if (!data) return [];
-    return Object.entries(data.productCount)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8)
-      .map(([name, count]) => ({ name: trimText(name, 28), count }));
-  }, [data]);
-
   const dailyChartData = useMemo(() => {
     if (!data) return [];
     return data.dailyRevenue.labels.map((day, index) => ({
@@ -107,7 +110,7 @@ export default function DashboardPage() {
   }, [data]);
 
   return (
-    <AppShell title="Dashboard" subtitle="Wykresy i tabele sprzedażowe Fitssey (styl i układ jak w starym dashboardzie).">
+    <AppShell title="Dashboard">
       {isLoading ? (
         <div className="rounded-2xl border border-slate-200/70 bg-white/90 p-4 text-sm text-muted-foreground shadow-[0_12px_32px_rgba(11,22,39,0.06)] backdrop-blur-sm">
           Ładowanie dashboardu...
@@ -157,7 +160,9 @@ export default function DashboardPage() {
                     <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
                     <YAxis tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} width={44} />
                     <Tooltip contentStyle={tooltipStyle} formatter={(value) => [money.format(Number(value || 0)), "Przychód"]} />
-                    <Bar dataKey="revenue" fill="#635bff" radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="revenue" fill="#635bff" radius={[6, 6, 0, 0]}>
+                      <LabelList dataKey="revenue" position="top" formatter={(value) => money.format(Number(value || 0))} fill="#0f172a" fontSize={11} />
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </ChartWrap>
@@ -171,37 +176,41 @@ export default function DashboardPage() {
                     <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
                     <YAxis tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} width={44} />
                     <Tooltip contentStyle={tooltipStyle} formatter={(value) => [String(value ?? 0), "Sprzedane karnety"]} />
-                    <Bar dataKey="passesSold" fill="#0ea5e9" radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="passesSold" fill="#0ea5e9" radius={[6, 6, 0, 0]}>
+                      <LabelList dataKey="passesSold" position="top" formatter={(value) => String(value ?? 0)} fill="#0f172a" fontSize={11} />
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </ChartWrap>
             </ChartCard>
 
-            <ChartCard title="Sprzedaż wg produktu (TOP 8)">
-              <ChartWrap tall>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart accessibilityLayer={false} data={productsData} layout="vertical" margin={{ top: 6, right: 8, left: 10, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(15,23,42,0.1)" />
-                    <XAxis type="number" tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} />
-                    <YAxis dataKey="name" type="category" width={170} tick={{ fontSize: 11, fill: "#475467" }} tickLine={false} axisLine={false} />
-                    <Tooltip contentStyle={tooltipStyle} formatter={(value) => [String(value), "Liczba sprzedaży"]} />
-                    <Bar dataKey="count" fill="#635bff" radius={[0, 6, 6, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </ChartWrap>
-            </ChartCard>
-
-            <ChartCard title="Nowi vs powracający klienci">
+            <ChartCard title="Nowi klienci">
               <ChartWrap tall>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart accessibilityLayer={false} data={monthlyChartData} margin={{ top: 6, right: 10, left: -10, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(15,23,42,0.1)" />
                     <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
                     <YAxis tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} width={44} />
-                    <Tooltip contentStyle={tooltipStyle} />
-                    <Legend wrapperStyle={{ fontSize: 12 }} />
-                    <Bar dataKey="newClients" stackId="a" fill="#0ea5e9" name="Nowi" radius={[4, 4, 0, 0]} />
-                    <Bar dataKey="returningClients" stackId="a" fill="#22c55e" name="Powracający" radius={[4, 4, 0, 0]} />
+                    <Tooltip contentStyle={tooltipStyle} formatter={(value) => [String(value ?? 0), "Nowi klienci"]} />
+                    <Bar dataKey="newClients" fill="#22c55e" name="Nowi klienci" radius={[4, 4, 0, 0]}>
+                      <LabelList dataKey="newClients" position="top" formatter={(value) => String(value ?? 0)} fill="#0f172a" fontSize={11} />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </ChartWrap>
+            </ChartCard>
+
+            <ChartCard title="Powracający klienci">
+              <ChartWrap tall>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart accessibilityLayer={false} data={monthlyChartData} margin={{ top: 6, right: 10, left: -10, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(15,23,42,0.1)" />
+                    <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+                    <YAxis tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} width={44} />
+                    <Tooltip contentStyle={tooltipStyle} formatter={(value) => [String(value ?? 0), "Powracający klienci"]} />
+                    <Bar dataKey="returningClients" fill="#f59e0b" name="Powracający klienci" radius={[4, 4, 0, 0]}>
+                      <LabelList dataKey="returningClients" position="top" formatter={(value) => String(value ?? 0)} fill="#0f172a" fontSize={11} />
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </ChartWrap>
@@ -216,8 +225,12 @@ export default function DashboardPage() {
                     <YAxis tick={{ fontSize: 11, fill: "#667085" }} tickLine={false} axisLine={false} width={44} />
                     <Tooltip contentStyle={tooltipStyle} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
-                    <Bar dataKey="current" fill="#8b5cf6" name="Aktualny miesiąc" radius={[4, 4, 0, 0]} />
-                    <Bar dataKey="previous" fill="#0ea5e9" name="Ten sam dzień poprzedniego miesiąca" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="current" fill="#8b5cf6" name="Aktualny miesiąc" radius={[4, 4, 0, 0]}>
+                      {!isMobile && <LabelList dataKey="current" position="top" formatter={(value) => money.format(Number(value || 0))} fill="#0f172a" fontSize={11} />}
+                    </Bar>
+                    <Bar dataKey="previous" fill="#0ea5e9" name="Ten sam dzień poprzedniego miesiąca" radius={[4, 4, 0, 0]}>
+                      {!isMobile && <LabelList dataKey="previous" position="top" formatter={(value) => money.format(Number(value || 0))} fill="#0f172a" fontSize={11} />}
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </ChartWrap>
@@ -226,15 +239,7 @@ export default function DashboardPage() {
           </section>
 
           <TableCard title="Klienci do kontaktu">
-            <ContactsTable rows={data.contacts} />
-          </TableCard>
-
-          <TableCard title="Nowi klienci - sprzedaż">
-            <SalesTable rows={data.newClientSales} tableType="new" />
-          </TableCard>
-
-          <TableCard title="Powracający klienci - sprzedaż">
-            <SalesTable rows={data.returningClientSales} tableType="returning" />
+            <ContactsTable rows={data.contacts} studioUuid={data.studioUuid} />
           </TableCard>
 
           <TableCard title="Wszyscy klienci">
@@ -284,55 +289,6 @@ function TableCard({ title, children }: { title: string; children: React.ReactNo
     <div className="min-w-0 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/90 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)] backdrop-blur-sm">
       <h3 className="mb-2 text-sm font-semibold text-slate-800">{title}</h3>
       {children}
-    </div>
-  );
-}
-
-function SalesTable({
-  rows,
-  tableType,
-}: {
-  rows: { month: string; date: string; clientName: string; product: string; amount: number; monthLinkStatus: string }[];
-  tableType: "new" | "returning";
-}) {
-  return (
-    <div className="max-w-full overflow-x-auto">
-      <Table className="min-w-[760px] text-xs">
-        <TableHeader>
-          <TableRow>
-            <TableHead>Miesiąc</TableHead>
-            <TableHead>Data</TableHead>
-            <TableHead>Klient</TableHead>
-            <TableHead>Produkt</TableHead>
-            <TableHead className="text-right">Kwota</TableHead>
-            <TableHead>Powiązanie m/m</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.length === 0 ? (
-            <TableRow>
-              <TableCell colSpan={6} className="text-muted-foreground">
-                Brak danych.
-              </TableCell>
-            </TableRow>
-          ) : (
-            rows.map((row, index) => (
-              <TableRow key={`${row.clientName}-${row.date}-${index}`} className={getSalesRowClass(row.monthLinkStatus)}>
-                <TableCell>{formatMonthKey(row.month)}</TableCell>
-                <TableCell>{new Date(row.date).toLocaleString("pl-PL")}</TableCell>
-                <TableCell>{row.clientName}</TableCell>
-                <TableCell>{row.product}</TableCell>
-                <TableCell className="text-right">{money.format(row.amount)}</TableCell>
-                <TableCell>
-                  <span className={getSalesBadgeClass(row.monthLinkStatus)}>
-                    {formatMonthLinkLabel(row.monthLinkStatus, tableType)}
-                  </span>
-                </TableCell>
-              </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
     </div>
   );
 }
@@ -388,100 +344,192 @@ function ClientsTable({
 
 function ContactsTable({
   rows,
+  studioUuid,
 }: {
   rows: {
     name: string;
+    clientGuid: string | null;
     lastPurchaseDate: string;
     daysSinceLastPurchase: number;
     lastPassPurchaseDate: string | null;
     daysSinceLastPass: number | null;
     expectedCycleDays: number | null;
     lifetimeRevenue: number;
+    email: string | null;
+    phone: string | null;
     reason: string;
     score: number;
     priority: string;
   }[];
+  studioUuid?: string;
 }) {
   return (
-    <div className="max-w-full overflow-x-auto">
-      <Table className="min-w-[980px] text-xs">
-        <TableHeader>
-          <TableRow>
-            <TableHead>Klient</TableHead>
-            <TableHead>Ostatni zakup</TableHead>
-            <TableHead className="text-right">Dni bez zakupu</TableHead>
-            <TableHead>Ostatni karnet</TableHead>
-            <TableHead className="text-right">Cykl</TableHead>
-            <TableHead>Powod kontaktu</TableHead>
-            <TableHead className="text-right">LTV</TableHead>
-            <TableHead className="text-right">Score</TableHead>
-            <TableHead>Priorytet</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.length === 0 ? (
+    <>
+      <div className="space-y-2 md:hidden">
+        {rows.length === 0 ? (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-muted-foreground">
+            Brak klientów do kontaktu.
+          </div>
+        ) : (
+          rows.map((row) => (
+            <div
+              key={`mobile-${row.name}-${row.lastPurchaseDate}`}
+              className={`rounded-xl border px-3 py-2 text-xs ${
+                row.priority === "wysoki"
+                  ? "border-rose-200 bg-rose-50/60"
+                  : row.priority === "sredni"
+                    ? "border-amber-200 bg-amber-50/60"
+                    : "border-slate-200 bg-white"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold text-slate-800">
+                  <ClientNameLink name={row.name} studioUuid={studioUuid} clientGuid={row.clientGuid} />
+                </p>
+                <span className={getPriorityBadgeClass(row.priority)}>{formatPriority(row.priority)}</span>
+              </div>
+              <p className="mt-1 text-slate-600">{row.reason}</p>
+              <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-slate-600">
+                <span>Ost. zakup:</span>
+                <span className="text-right">{new Date(row.lastPurchaseDate).toLocaleDateString("pl-PL")}</span>
+                <span>Dni bez zakupu:</span>
+                <span className="text-right">{row.daysSinceLastPurchase}</span>
+                <span>Ost. karnet:</span>
+                <span className="text-right">{row.lastPassPurchaseDate ? new Date(row.lastPassPurchaseDate).toLocaleDateString("pl-PL") : "-"}</span>
+                <span>Cykl:</span>
+                <span className="text-right">{row.expectedCycleDays ?? "-"}</span>
+                <span>LTV:</span>
+                <span className="text-right">{money.format(row.lifetimeRevenue)}</span>
+                <span>Score:</span>
+                <span className="text-right font-semibold text-slate-800">{row.score}</span>
+              </div>
+              <div className="mt-2 space-y-1 border-t border-slate-200 pt-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">Email:</span>
+                  <div className="max-w-[170px] truncate text-right">
+                    <ContactValueLink type="email" value={row.email} />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">Telefon:</span>
+                  <div className="max-w-[170px] truncate text-right">
+                    <ContactValueLink type="phone" value={row.phone} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="hidden max-w-full overflow-x-auto md:block">
+        <Table className="min-w-[980px] text-xs">
+          <TableHeader>
             <TableRow>
-              <TableCell colSpan={9} className="text-muted-foreground">
-                Brak klientów do kontaktu.
-              </TableCell>
+              <TableHead>Klient</TableHead>
+              <TableHead>Ostatni zakup</TableHead>
+              <TableHead className="text-right">Dni bez zakupu</TableHead>
+              <TableHead>Ostatni karnet</TableHead>
+              <TableHead className="text-right">Cykl</TableHead>
+              <TableHead>Powod kontaktu</TableHead>
+              <TableHead>Email</TableHead>
+              <TableHead>Telefon</TableHead>
+              <TableHead className="text-right">LTV</TableHead>
+              <TableHead className="text-right">Score</TableHead>
+              <TableHead>Priorytet</TableHead>
             </TableRow>
-          ) : (
-            rows.map((row) => (
-              <TableRow key={`${row.name}-${row.lastPurchaseDate}`} className={row.priority === "wysoki" ? "bg-rose-50/60" : row.priority === "sredni" ? "bg-amber-50/60" : ""}>
-                <TableCell>{row.name}</TableCell>
-                <TableCell>{new Date(row.lastPurchaseDate).toLocaleDateString("pl-PL")}</TableCell>
-                <TableCell className="text-right">{row.daysSinceLastPurchase}</TableCell>
-                <TableCell>{row.lastPassPurchaseDate ? new Date(row.lastPassPurchaseDate).toLocaleDateString("pl-PL") : "-"}</TableCell>
-                <TableCell className="text-right">{row.expectedCycleDays ?? "-"}</TableCell>
-                <TableCell>{row.reason}</TableCell>
-                <TableCell className="text-right">{money.format(row.lifetimeRevenue)}</TableCell>
-                <TableCell className="text-right">{row.score}</TableCell>
-                <TableCell>
-                  <span className={getPriorityBadgeClass(row.priority)}>{formatPriority(row.priority)}</span>
+          </TableHeader>
+          <TableBody>
+            {rows.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={11} className="text-muted-foreground">
+                  Brak klientów do kontaktu.
                 </TableCell>
               </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
-    </div>
+            ) : (
+              rows.map((row) => (
+                <TableRow key={`${row.name}-${row.lastPurchaseDate}`} className={row.priority === "wysoki" ? "bg-rose-50/60" : row.priority === "sredni" ? "bg-amber-50/60" : ""}>
+                  <TableCell>
+                    <ClientNameLink name={row.name} studioUuid={studioUuid} clientGuid={row.clientGuid} />
+                  </TableCell>
+                  <TableCell>{new Date(row.lastPurchaseDate).toLocaleDateString("pl-PL")}</TableCell>
+                  <TableCell className="text-right">{row.daysSinceLastPurchase}</TableCell>
+                  <TableCell>{row.lastPassPurchaseDate ? new Date(row.lastPassPurchaseDate).toLocaleDateString("pl-PL") : "-"}</TableCell>
+                  <TableCell className="text-right">{row.expectedCycleDays ?? "-"}</TableCell>
+                  <TableCell>{row.reason}</TableCell>
+                  <TableCell>
+                    <div className="max-w-[220px] truncate">
+                      <ContactValueLink type="email" value={row.email} />
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="max-w-[170px] truncate">
+                      <ContactValueLink type="phone" value={row.phone} />
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-right">{money.format(row.lifetimeRevenue)}</TableCell>
+                  <TableCell className="text-right">{row.score}</TableCell>
+                  <TableCell>
+                    <span className={getPriorityBadgeClass(row.priority)}>{formatPriority(row.priority)}</span>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </div>
+    </>
+  );
+}
+
+function ClientNameLink({
+  name,
+  studioUuid,
+  clientGuid,
+}: {
+  name: string;
+  studioUuid?: string;
+  clientGuid?: string | null;
+}) {
+  if (!studioUuid || !clientGuid) return <>{name}</>;
+  const href = `https://app.fitssey.com/${encodeURIComponent(studioUuid)}/backoffice.v4/client/${encodeURIComponent(clientGuid)}/`;
+  return (
+    <a href={href} target="_blank" rel="noreferrer" className="text-slate-900 underline decoration-slate-300 underline-offset-2 hover:text-sky-700 hover:decoration-sky-400">
+      {name}
+    </a>
+  );
+}
+
+function ContactValueLink({
+  type,
+  value,
+}: {
+  type: "email" | "phone";
+  value: string | null | undefined;
+}) {
+  const normalized = String(value ?? "").trim();
+  const hasValue = normalized.length > 0;
+  const href = type === "email"
+    ? `mailto:${normalized}`
+    : `tel:${normalized.replace(/[^\d+]/g, "")}`;
+
+  if (!hasValue) {
+    return <span className="text-slate-400">-</span>;
+  }
+
+  return (
+    <a
+      href={href}
+      className="text-slate-700 underline decoration-slate-300 underline-offset-2 hover:text-sky-700 hover:decoration-sky-400"
+    >
+      {normalized}
+    </a>
   );
 }
 
 function formatMonthKey(monthKey: string) {
   const [year, month] = monthKey.split("-");
   return `${month}/${year}`;
-}
-
-function trimText(value: string, max: number) {
-  return value.length <= max ? value : `${value.slice(0, max - 1)}...`;
-}
-
-function formatMonthLinkLabel(status: string, tableType: "new" | "returning") {
-  if (tableType === "new" && status.includes("Brak zakupu w poprzednim")) {
-    return "—";
-  }
-  return status;
-}
-
-function getSalesRowClass(status: string) {
-  if (status.includes("Brak zakupu w aktualnym")) {
-    return "bg-rose-50/70";
-  }
-  if (status.includes("Kupował też w poprzednim") || status.includes("Kupił też w aktualnym")) {
-    return "bg-emerald-50/60";
-  }
-  return "";
-}
-
-function getSalesBadgeClass(status: string) {
-  if (status.includes("Brak zakupu w aktualnym")) {
-    return "inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700";
-  }
-  if (status.includes("Kupował też w poprzednim") || status.includes("Kupił też w aktualnym")) {
-    return "inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700";
-  }
-  return "inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600";
 }
 
 function getPriorityBadgeClass(priority: string) {

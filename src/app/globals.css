@@ -30,6 +30,10 @@
   --font-mono: var(--font-geist-mono);
 }
 
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
@@ -58,9 +62,24 @@ input[type="date"].date-empty::-webkit-datetime-edit {
   color: transparent;
 }
 
+.recharts-wrapper,
+.recharts-surface,
+.recharts-responsive-container,
+.recharts-wrapper *,
+.recharts-surface * {
+  -webkit-tap-highlight-color: transparent;
+}
+
 .recharts-wrapper:focus,
 .recharts-wrapper:focus-visible,
 .recharts-surface:focus,
-.recharts-surface:focus-visible {
+.recharts-surface:focus-visible,
+.recharts-responsive-container:focus,
+.recharts-responsive-container:focus-visible,
+.recharts-wrapper *:focus,
+.recharts-wrapper *:focus-visible,
+.recharts-surface *:focus,
+.recharts-surface *:focus-visible {
   outline: none !important;
+  box-shadow: none !important;
 }

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db";
+import { getCachedFitsseyClients, syncFitsseyClientEntriesForUsers, syncFitsseyClientsCache } from "@/lib/fitssey-clients";
 import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
 type SalesRow = {
@@ -9,7 +10,14 @@ type SalesRow = {
   itemName?: string;
   itemTotalPrice?: number | string;
   itemPrice?: number | string;
+  userGuid?: string;
+  clientUuid?: string;
   userFullName?: string;
+  userEmail?: string;
+  email?: string;
+  userPhone?: string;
+  phone?: string;
+  phoneNumber?: string;
 };
 
 type SalesRecord = {
@@ -17,6 +25,10 @@ type SalesRecord = {
   month: string;
   clientName: string;
   clientKey: string;
+  clientGuid: string | null;
+  clientUuid: string | null;
+  clientEmail: string | null;
+  clientPhone: string | null;
   product: string;
   amount: number;
   isPass: boolean;
@@ -46,6 +58,23 @@ function safeText(value: unknown) {
   return String(value ?? "").trim();
 }
 
+function normalizeName(value: unknown) {
+  return safeText(value).replace(/\s+/g, " ").toLowerCase();
+}
+
+function normalizeEmail(value: unknown) {
+  const email = safeText(value).toLowerCase();
+  if (!email || !email.includes("@")) return null;
+  return email;
+}
+
+function normalizePhone(value: unknown) {
+  const raw = safeText(value);
+  if (!raw) return null;
+  const cleaned = raw.replace(/[^\d+]/g, "");
+  return cleaned.length >= 6 ? cleaned : null;
+}
+
 function isPassProduct(product: string) {
   const normalized = product.toLowerCase();
   return /karnet|pass|pakiet/.test(normalized)
@@ -72,7 +101,11 @@ async function getFitsseyCredentials() {
 
 async function fetchSalesPage(baseUrl: string, headers: HeadersInit, startDate: string, endDate: string, page: number) {
   const url = `${baseUrl}/report/finance/sales?startDate=${startDate}&endDate=${endDate}&page=${page}&count=${PAGE_SIZE}`;
-  const response = await fetch(url, { method: "GET", headers, cache: "no-store" });
+  const response = await fetch(url, {
+    method: "GET",
+    headers,
+    next: { revalidate: 900 },
+  });
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`Fitssey API ${response.status}: ${body.slice(0, 140)}`);
@@ -90,11 +123,20 @@ function mapSalesRow(row: SalesRow): SalesRecord | null {
   if (!Number.isFinite(amount) || amount <= 0) return null;
   const product = safeText(row.itemName) || "Produkt";
   const clientName = safeText(row.userFullName) || "Nieznany klient";
+  const clientGuid = safeText(row.userGuid) || null;
+  const clientUuid = safeText(row.clientUuid) || null;
+  const clientEmail = normalizeEmail(row.userEmail ?? row.email);
+  const clientPhone = normalizePhone(row.userPhone ?? row.phone ?? row.phoneNumber);
+  const clientKey = clientGuid?.toLowerCase() || clientUuid?.toLowerCase() || `name:${normalizeName(clientName)}`;
   return {
     date,
     month: toMonthKey(date),
     clientName,
-    clientKey: clientName.toLowerCase(),
+    clientKey,
+    clientGuid,
+    clientUuid,
+    clientEmail,
+    clientPhone,
     product,
     amount,
     isPass: isPassProduct(product),
@@ -218,13 +260,37 @@ function getPriority(score: number) {
 }
 
 function getFreshnessWeight(daysSince: number) {
-  if (daysSince <= 45) return 1;
-  if (daysSince <= 90) return 0.6;
-  if (daysSince <= 120) return 0.25;
+  if (daysSince <= 60) return 1;
+  if (daysSince <= 120) return 0.7;
+  if (daysSince <= 180) return 0.4;
+  if (daysSince <= 240) return 0.2;
   return 0;
 }
 
-function buildAnalytics(records: SalesRecord[]) {
+function buildAnalytics(
+  records: SalesRecord[],
+  cachedClients: {
+    externalGuid: string;
+    clientUuid: string | null;
+    normalizedName: string;
+    email: string | null;
+    phone: string | null;
+    activeEntries: number | null;
+  }[],
+) {
+  const clientsByGuid = new Map<string, { email: string | null; phone: string | null; activeEntries: number | null }>();
+  const clientsByUuid = new Map<string, { email: string | null; phone: string | null; activeEntries: number | null }>();
+  const clientsByName = new Map<string, { email: string | null; phone: string | null; activeEntries: number | null }>();
+  for (const row of cachedClients) {
+    const contact = { email: row.email, phone: row.phone, activeEntries: row.activeEntries };
+    const guidKey = safeText(row.externalGuid).toLowerCase();
+    const uuidKey = safeText(row.clientUuid).toLowerCase();
+    const nameKey = normalizeName(row.normalizedName);
+    if (guidKey) clientsByGuid.set(guidKey, contact);
+    if (uuidKey) clientsByUuid.set(uuidKey, contact);
+    if (nameKey) clientsByName.set(nameKey, contact);
+  }
+
   const months = [...new Set(records.map((row) => row.month))].sort();
   const latestMonth = months.at(-1) ?? null;
   const previousMonth = months.length > 1 ? months.at(-2) ?? null : null;
@@ -273,6 +339,10 @@ function buildAnalytics(records: SalesRecord[]) {
       passMonths: Set<string>;
       singleEntryCount: number;
       lastSingleEntryDate: Date | null;
+      activeEntries: number | null;
+      clientGuid: string | null;
+      email: string | null;
+      phone: string | null;
     }
   >();
   for (let i = 0; i < months.length; i += 1) {
@@ -298,6 +368,11 @@ function buildAnalytics(records: SalesRecord[]) {
   const latestMrr = latestMonth ? mrrByMonth[latestMonth] || 0 : 0;
 
   for (const row of records) {
+    const cachedContact = (row.clientGuid && clientsByGuid.get(row.clientGuid.toLowerCase()))
+      || (row.clientUuid && clientsByUuid.get(row.clientUuid.toLowerCase()))
+      || clientsByName.get(normalizeName(row.clientName))
+      || null;
+
     const stat = clientStats.get(row.clientKey) ?? {
       name: row.clientName,
       lifetimeRevenue: 0,
@@ -309,6 +384,10 @@ function buildAnalytics(records: SalesRecord[]) {
       passMonths: new Set<string>(),
       singleEntryCount: 0,
       lastSingleEntryDate: null,
+      activeEntries: cachedContact?.activeEntries ?? null,
+      clientGuid: row.clientGuid,
+      email: row.clientEmail ?? cachedContact?.email ?? null,
+      phone: row.clientPhone ?? cachedContact?.phone ?? null,
     };
     stat.name = row.clientName;
     stat.lifetimeRevenue += row.amount;
@@ -323,6 +402,14 @@ function buildAnalytics(records: SalesRecord[]) {
       stat.singleEntryCount += 1;
       if (!stat.lastSingleEntryDate || row.date > stat.lastSingleEntryDate) stat.lastSingleEntryDate = row.date;
     }
+    if (!stat.email && row.clientEmail) stat.email = row.clientEmail;
+    if (!stat.phone && row.clientPhone) stat.phone = row.clientPhone;
+    if (!stat.clientGuid && row.clientGuid) stat.clientGuid = row.clientGuid;
+    if (stat.activeEntries === null && cachedContact?.activeEntries !== null && cachedContact?.activeEntries !== undefined) {
+      stat.activeEntries = cachedContact.activeEntries;
+    }
+    if (!stat.email && cachedContact?.email) stat.email = cachedContact.email;
+    if (!stat.phone && cachedContact?.phone) stat.phone = cachedContact.phone;
     clientStats.set(row.clientKey, stat);
   }
 
@@ -339,14 +426,14 @@ function buildAnalytics(records: SalesRecord[]) {
       const expectedCycleDays = client.lastPassPurchaseDate ? estimatePassCycleDays(client.passPurchaseDates) : null;
       const hasPassLatest = latestMonth ? client.passMonths.has(latestMonth) : false;
       const hasPurchaseLatest = latestMonth ? client.purchaseMonths.has(latestMonth) : false;
-      const hasNotConvertedSingle =
-        client.lastSingleEntryDate && (!client.lastPassPurchaseDate || client.lastPassPurchaseDate < client.lastSingleEntryDate);
+      // "Jednorazowe wejscie bez konwersji" only for clients that never bought a pass.
+      const hasNotConvertedSingle = client.lastSingleEntryDate && client.passPurchaseDates.length === 0;
 
       let score = 0;
       let reason = "";
 
       if (hasNotConvertedSingle && daysSinceLastSingle !== null) {
-        if (daysSinceLastSingle > 120) {
+        if (daysSinceLastSingle > 210) {
           score = 0;
           reason = "";
         } else {
@@ -356,7 +443,10 @@ function buildAnalytics(records: SalesRecord[]) {
         reason = "Jednorazowe wejscie bez konwersji na karnet";
         }
       } else if (client.lastPassPurchaseDate && !hasPassLatest && daysSinceLastPass !== null) {
-        if (daysSinceLastPass > 120) {
+        if (client.activeEntries !== null && client.activeEntries > 1) {
+          score = 0;
+          reason = "";
+        } else if (daysSinceLastPass > 210) {
           score = 0;
           reason = "";
         } else {
@@ -364,11 +454,14 @@ function buildAnalytics(records: SalesRecord[]) {
           const overduePart = Math.min(26, Math.max(0, overdue) * 0.9);
           const ltvPart = Math.min(10, client.lifetimeRevenue / 400);
           const freshness = getFreshnessWeight(daysSinceLastPass);
-          score = (18 + overduePart + ltvPart + (hasPurchaseLatest ? 0 : 5)) * freshness;
-          reason = overdue > 5 ? "Karnet prawdopodobnie nie zostal odnowiony" : "Klient po karnecie bez kolejnego zakupu";
+          const lastEntriesBonus = client.activeEntries === 1 ? 8 : 0;
+          score = (18 + overduePart + ltvPart + (hasPurchaseLatest ? 0 : 5) + lastEntriesBonus) * freshness;
+          reason = client.activeEntries === 1
+            ? "Ostatnie wejscie w karnecie - dobry moment na odnowienie"
+            : (overdue > 5 ? "Karnet prawdopodobnie nie zostal odnowiony" : "Klient po karnecie bez kolejnego zakupu");
         }
       } else if (!hasPurchaseLatest && daysSinceLastPurchase >= 30) {
-        if (daysSinceLastPurchase > 90) {
+        if (daysSinceLastPurchase > 180) {
           score = 0;
           reason = "";
         } else {
@@ -385,14 +478,24 @@ function buildAnalytics(records: SalesRecord[]) {
         daysSinceLastPass,
         expectedCycleDays,
         lifetimeRevenue: client.lifetimeRevenue,
+        activeEntries: client.activeEntries,
+        clientGuid: client.clientGuid,
+        email: client.email,
+        phone: client.phone,
         reason,
         score: Math.round(score),
         priority: getPriority(score),
       };
     })
-    .filter((client) => client.score >= 12 && client.reason)
+    .filter((client) => {
+      if (!client.reason) return false;
+      const isSingleEntryLead = client.reason.toLowerCase().includes("jednoraz");
+      // Sales view should include a broader pool of single-entry leads.
+      if (isSingleEntryLead) return client.score >= 6;
+      return client.score >= 12;
+    })
     .sort((a, b) => b.score - a.score || a.daysSinceLastPurchase - b.daysSinceLastPurchase || b.lifetimeRevenue - a.lifetimeRevenue)
-    .slice(0, 30);
+    .slice(0, 200);
 
   const selectedMonths = [previousMonth, latestMonth].filter((month): month is string => Boolean(month));
   const selectedSet = new Set(selectedMonths);
@@ -458,9 +561,29 @@ export async function GET() {
   }
 
   try {
+    const credentials = await getFitsseyCredentials();
+    const cachedClients = await getCachedFitsseyClients();
+    // Never block dashboard render on client-cache sync.
+    if (cachedClients.length === 0) {
+      void Promise.resolve(credentials)
+        .then((c) => syncFitsseyClientsCache(c.studioUuid, c.apiKey))
+        .catch((error) => {
+          console.error("Fitssey clients async cache sync failed:", error);
+        });
+    }
     const records = await fetchSalesRecords();
-    const analytics = buildAnalytics(records);
-    return NextResponse.json(analytics);
+    const leadUsersToRefresh = records
+      .slice(-320)
+      .map((row) => ({ externalGuid: row.clientGuid ?? "", clientUuid: row.clientUuid }))
+      .filter((row) => row.externalGuid);
+    void syncFitsseyClientEntriesForUsers(credentials.studioUuid, credentials.apiKey, leadUsersToRefresh).catch((error) => {
+      console.error("Fitssey entries async cache sync failed:", error);
+    });
+    const analytics = buildAnalytics(records, cachedClients);
+    return NextResponse.json({
+      ...analytics,
+      studioUuid: credentials.studioUuid,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Dashboard fetch failed.";
     return NextResponse.json({ error: message }, { status: 500 });
