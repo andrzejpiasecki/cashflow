@@ -170,6 +170,31 @@ async function fetchSalesRecords() {
   return rows.map(mapSalesRow).filter((record): record is SalesRecord => Boolean(record)).sort((a, b) => a.date.getTime() - b.date.getTime());
 }
 
+async function getImportedRevenueSnapshot() {
+  const rows = await db.flowRow.findMany({
+    where: { type: "income", isImported: true },
+    select: { name: true, monthValues: true },
+  });
+
+  const revenueByMonth = new Map<string, number>();
+  const mrrByMonth = new Map<string, number>();
+
+  for (const row of rows) {
+    const isPassRow = isPassProduct(row.name);
+    const monthValues = row.monthValues as Record<string, unknown>;
+    for (const [month, rawValue] of Object.entries(monthValues ?? {})) {
+      const value = typeof rawValue === "number" ? rawValue : Number(rawValue) || 0;
+      if (!Number.isFinite(value) || value === 0) continue;
+      revenueByMonth.set(month, (revenueByMonth.get(month) || 0) + value);
+      if (isPassRow) {
+        mrrByMonth.set(month, (mrrByMonth.get(month) || 0) + value);
+      }
+    }
+  }
+
+  return { revenueByMonth, mrrByMonth };
+}
+
 function buildDailyRevenueSeries(records: SalesRecord[]) {
   const byDay = new Map<string, number>();
   for (const row of records) {
@@ -277,6 +302,10 @@ function buildAnalytics(
     phone: string | null;
     activeEntries: number | null;
   }[],
+  importedSnapshot?: {
+    revenueByMonth: Map<string, number>;
+    mrrByMonth: Map<string, number>;
+  },
 ) {
   const clientsByGuid = new Map<string, { email: string | null; phone: string | null; activeEntries: number | null }>();
   const clientsByUuid = new Map<string, { email: string | null; phone: string | null; activeEntries: number | null }>();
@@ -314,6 +343,13 @@ function buildAnalytics(
     productCount[row.product] = (productCount[row.product] || 0) + 1;
     uniqueClientsByMonth[row.month].add(row.clientKey);
     if (!clientFirstMonth[row.clientKey]) clientFirstMonth[row.clientKey] = row.month;
+  }
+
+  if (importedSnapshot) {
+    for (const month of months) {
+      revenueByMonth[month] = Math.round(importedSnapshot.revenueByMonth.get(month) || 0);
+      mrrByMonth[month] = Math.round(importedSnapshot.mrrByMonth.get(month) || 0);
+    }
   }
 
   for (const month of months) {
@@ -358,7 +394,7 @@ function buildAnalytics(
   }
 
   const comparable = buildComparableMonthToDateRevenue(records);
-  const totalRevenue = records.reduce((sum, row) => sum + row.amount, 0);
+  const totalRevenue = Object.values(revenueByMonth).reduce((sum, value) => sum + value, 0);
   const totalSales = records.length;
   const passSales = records.filter((row) => row.isPass).length;
   const avgTicket = totalSales > 0 ? totalRevenue / totalSales : 0;
@@ -366,6 +402,10 @@ function buildAnalytics(
   const latestActive = latestMonth ? activeClientsByMonth[latestMonth] || 0 : 0;
   const latestChurn = latestMonth ? churnByMonth[latestMonth] || 0 : 0;
   const latestMrr = latestMonth ? mrrByMonth[latestMonth] || 0 : 0;
+  const currentPeriodRevenue = latestMonth ? revenueByMonth[latestMonth] || 0 : comparable.currentPeriodRevenue;
+  const previousPeriodRevenue = comparable.previousPeriodRevenue;
+  const previousFullMonthRevenue = previousMonth ? revenueByMonth[previousMonth] || 0 : comparable.previousFullMonthRevenue;
+  const revenueMoMChange = previousPeriodRevenue > 0 ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100 : null;
 
   for (const row of records) {
     const cachedContact = (row.clientGuid && clientsByGuid.get(row.clientGuid.toLowerCase()))
@@ -535,10 +575,10 @@ function buildAnalytics(
     latestChurn,
     avgTicket,
     passShare: totalSales > 0 ? (passSales / totalSales) * 100 : 0,
-    currentPeriodRevenue: comparable.currentPeriodRevenue,
-    previousPeriodRevenue: comparable.previousPeriodRevenue,
-    previousFullMonthRevenue: comparable.previousFullMonthRevenue,
-    revenueMoMChange: comparable.revenueMoMChange,
+    currentPeriodRevenue,
+    previousPeriodRevenue,
+    previousFullMonthRevenue,
+    revenueMoMChange,
     revenueByMonth,
     mrrByMonth,
     passesSoldByMonth,
@@ -579,7 +619,8 @@ export async function GET() {
     void syncFitsseyClientEntriesForUsers(credentials.studioUuid, credentials.apiKey, leadUsersToRefresh).catch((error) => {
       console.error("Fitssey entries async cache sync failed:", error);
     });
-    const analytics = buildAnalytics(records, cachedClients);
+    const importedSnapshot = await getImportedRevenueSnapshot();
+    const analytics = buildAnalytics(records, cachedClients, importedSnapshot);
     return NextResponse.json({
       ...analytics,
       studioUuid: credentials.studioUuid,

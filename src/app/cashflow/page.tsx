@@ -63,6 +63,29 @@ function vatFromGross(amount: number, rate: number) {
   return amount * (rate / (100 + rate));
 }
 
+function getForecastMetrics(
+  actualByMonth: { key: string; income: number; expenses: number }[],
+  currentMonthKey: string,
+  revenueMoMChangePercent: number | null,
+) {
+  const previousMonthsIncome = actualByMonth
+    .filter((month) => month.key < currentMonthKey)
+    .map((month) => month.income)
+    .slice(-2);
+  const previousMonthIncome = previousMonthsIncome.at(-1) ?? 0;
+  const monthOverMonthChange = revenueMoMChangePercent != null ? revenueMoMChangePercent / 100 : 0;
+  const currentMonthForecastContribution = Math.max(0, Math.round(previousMonthIncome * (1 + monthOverMonthChange)));
+  const forecastInputs = previousMonthIncome > 0
+    ? [...previousMonthsIncome, currentMonthForecastContribution]
+    : previousMonthsIncome;
+
+  const forecastBaseline = forecastInputs.length > 0
+    ? Math.round(forecastInputs.reduce((sum, value) => sum + value, 0) / forecastInputs.length)
+    : 0;
+
+  return { forecastBaseline, currentMonthForecastContribution };
+}
+
 export default function CashflowPage() {
   const { isLoaded, isSignedIn } = useAuth();
   const [rows, setRows] = useState<FlowRow[]>([]);
@@ -84,6 +107,7 @@ export default function CashflowPage() {
   const [vatInfoPosition, setVatInfoPosition] = useState<InfoPopoverPosition | null>(null);
   const [showCitInfo, setShowCitInfo] = useState(false);
   const [citInfoPosition, setCitInfoPosition] = useState<InfoPopoverPosition | null>(null);
+  const [dashboardRevenueMoMChange, setDashboardRevenueMoMChange] = useState<number | null>(null);
 
   useEffect(() => {
     if (!fillModal) return;
@@ -142,6 +166,18 @@ export default function CashflowPage() {
       }
     };
 
+    const loadRevenueMetrics = async () => {
+      try {
+        const response = await fetch("/api/fitssey/revenue-metrics");
+        if (!response.ok) return;
+        const payload = (await response.json()) as { revenueMoMChange?: number | null };
+        if (!isMounted) return;
+        setDashboardRevenueMoMChange(typeof payload.revenueMoMChange === "number" ? payload.revenueMoMChange : null);
+      } catch {
+        // keep fallback
+      }
+    };
+
     const backgroundSync = async () => {
       if (isSyncingRef.current) return;
       const nowMs = Date.now();
@@ -154,7 +190,7 @@ export default function CashflowPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ auto: true }),
         });
-        await loadRows(false);
+        await Promise.all([loadRows(false), loadRevenueMetrics()]);
       } catch {
         // Silent background sync.
       } finally {
@@ -172,6 +208,7 @@ export default function CashflowPage() {
     };
 
     void loadTaxSettings();
+    void loadRevenueMetrics();
     void loadRows(true).then(() => {
       void backgroundSync();
     });
@@ -218,13 +255,7 @@ export default function CashflowPage() {
       return { key, income, expenses };
     });
 
-    const previousMonthsIncome = actualByMonth
-      .filter((month) => month.key < currentMonthKey)
-      .map((month) => month.income)
-      .slice(-3);
-    const forecastBaseline = previousMonthsIncome.length > 0
-      ? Math.round(previousMonthsIncome.reduce((sum, value) => sum + value, 0) / previousMonthsIncome.length)
-      : 0;
+    const { forecastBaseline, currentMonthForecastContribution } = getForecastMetrics(actualByMonth, currentMonthKey, dashboardRevenueMoMChange);
 
     return new Map(
       actualByMonth.map((month) => {
@@ -234,11 +265,15 @@ export default function CashflowPage() {
         const importedIncomeGrossActual = incomeRows
           .filter((row) => row.isImported)
           .reduce((sum, row) => sum + getCellValue(row, month.key), 0);
-        const importedIncomeGrossEffective = month.key > currentMonthKey ? Math.round(forecastBaseline) : importedIncomeGrossActual;
+        const importedIncomeGrossEffective = month.key === currentMonthKey
+          ? currentMonthForecastContribution
+          : month.key > currentMonthKey
+            ? Math.round(forecastBaseline)
+            : importedIncomeGrossActual;
         const importedOutputVat = incomeRows
           .filter((row) => row.isImported)
           .reduce((sum, row) => {
-            const rowValue = month.key > currentMonthKey
+            const rowValue = month.key >= currentMonthKey
               ? (importedIncomeGrossActual > 0 ? (getCellValue(row, month.key) / importedIncomeGrossActual) * importedIncomeGrossEffective : 0)
               : getCellValue(row, month.key);
             const rowVatRate = row.vatRate ?? DEFAULT_FITSSEY_VAT_RATE;
@@ -261,7 +296,7 @@ export default function CashflowPage() {
         ];
       }),
     );
-  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, vatRate]);
+  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, vatRate, dashboardRevenueMoMChange]);
 
   const timelineComputed = useMemo(() => {
     const actualByMonth = timelineMonths.map((key) => {
@@ -270,13 +305,7 @@ export default function CashflowPage() {
       return { key, income, expenses };
     });
 
-    const previousMonthsIncome = actualByMonth
-      .filter((month) => month.key < currentMonthKey)
-      .map((month) => month.income)
-      .slice(-3);
-    const forecastBaseline = previousMonthsIncome.length > 0
-      ? Math.round(previousMonthsIncome.reduce((sum, value) => sum + value, 0) / previousMonthsIncome.length)
-      : 0;
+    const { forecastBaseline, currentMonthForecastContribution } = getForecastMetrics(actualByMonth, currentMonthKey, dashboardRevenueMoMChange);
 
     const computed = [];
     let cumulative = 0;
@@ -288,8 +317,12 @@ export default function CashflowPage() {
 
     for (let index = 0; index < actualByMonth.length; index += 1) {
       const month = actualByMonth[index];
-      const forecastIncome = month.key > currentMonthKey ? Math.round(forecastBaseline) : month.income;
-      const effectiveIncome = forecastIncome;
+      const forecastIncome = month.key === currentMonthKey
+        ? currentMonthForecastContribution
+        : month.key > currentMonthKey
+          ? Math.round(forecastBaseline)
+          : month.income;
+      const effectiveIncome = month.key >= currentMonthKey ? forecastIncome : month.income;
       const balance = effectiveIncome - month.expenses;
       const year = Number(month.key.slice(0, 4));
       const prevProfitYtd = yearProfitYtd.get(year) ?? 0;
@@ -323,7 +356,7 @@ export default function CashflowPage() {
     }
 
     return new Map(computed.map((month) => [month.key, month]));
-  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, citRate, vatMonthBreakdown]);
+  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, citRate, vatMonthBreakdown, dashboardRevenueMoMChange]);
 
   const taxInfoMonthKey = useMemo(() => {
     if (vatMonthBreakdown.has(currentMonthKey) || timelineComputed.has(currentMonthKey)) return currentMonthKey;
