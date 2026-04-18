@@ -104,7 +104,9 @@ async function fetchSalesPage(baseUrl: string, headers: HeadersInit, startDate: 
   const response = await fetch(url, {
     method: "GET",
     headers,
-    next: { revalidate: 900 },
+    // Paginated financial data must be fetched from a consistent snapshot.
+    // Per-page revalidation can mix stale and fresh pages and skew historical metrics.
+    cache: "no-store",
   });
   if (!response.ok) {
     const body = await response.text();
@@ -127,7 +129,11 @@ function mapSalesRow(row: SalesRow): SalesRecord | null {
   const clientUuid = safeText(row.clientUuid) || null;
   const clientEmail = normalizeEmail(row.userEmail ?? row.email);
   const clientPhone = normalizePhone(row.userPhone ?? row.phone ?? row.phoneNumber);
-  const clientKey = clientGuid?.toLowerCase() || clientUuid?.toLowerCase() || `name:${normalizeName(clientName)}`;
+  const clientKey = clientGuid?.toLowerCase()
+    || clientUuid?.toLowerCase()
+    || (clientEmail ? `email:${clientEmail}` : null)
+    || (clientPhone ? `phone:${clientPhone}` : null)
+    || `name:${normalizeName(clientName)}`;
   return {
     date,
     month: toMonthKey(date),

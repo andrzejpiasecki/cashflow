@@ -30,6 +30,7 @@ async function parseResponsePayload(response: Response) {
 export default function SettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [status, setStatus] = useState("");
 
   const [studioUuid, setStudioUuid] = useState("");
@@ -42,30 +43,31 @@ export default function SettingsPage() {
   const [lastImportedAt, setLastImportedAt] = useState<string | null>(null);
   const [lastImportStatus, setLastImportStatus] = useState<string | null>(null);
 
-  useEffect(() => {
-    const load = async () => {
-      setIsLoading(true);
-      setStatus("");
-      try {
-        const response = await fetch("/api/settings/fitssey");
-        const payload = await parseResponsePayload(response);
-        if (!response.ok) {
-          setStatus(payload.error ?? "Nie udało się pobrać ustawień.");
-          return;
-        }
-        const data = payload;
-        setStudioUuid(data.studioUuid ?? "");
-        setStartDate(data.startDate ?? "");
-        setCitRate(Number(data.citRate ?? 19));
-        setVatRate(Number(data.vatRate ?? 23));
-        setApiKeyConfigured(Boolean(data.apiKeyConfigured));
-        setApiKeyPreview(data.apiKeyPreview ?? null);
-        setLastImportedAt(data.lastImportedAt ?? null);
-        setLastImportStatus(data.lastImportStatus ?? null);
-      } finally {
-        setIsLoading(false);
+  const load = async () => {
+    setIsLoading(true);
+    setStatus("");
+    try {
+      const response = await fetch("/api/settings/fitssey");
+      const payload = await parseResponsePayload(response);
+      if (!response.ok) {
+        setStatus(payload.error ?? "Nie udało się pobrać ustawień.");
+        return;
       }
-    };
+      const data = payload;
+      setStudioUuid(data.studioUuid ?? "");
+      setStartDate(data.startDate ?? "");
+      setCitRate(Number(data.citRate ?? 19));
+      setVatRate(Number(data.vatRate ?? 23));
+      setApiKeyConfigured(Boolean(data.apiKeyConfigured));
+      setApiKeyPreview(data.apiKeyPreview ?? null);
+      setLastImportedAt(data.lastImportedAt ?? null);
+      setLastImportStatus(data.lastImportStatus ?? null);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
     void load();
   }, []);
 
@@ -97,6 +99,27 @@ export default function SettingsPage() {
       setStatus("Ustawienia zapisane.");
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const refreshFitsseyData = async () => {
+    setIsRefreshing(true);
+    setStatus("");
+    try {
+      const response = await fetch("/api/fitssey/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auto: false }),
+      });
+      const payload = await parseResponsePayload(response);
+      if (!response.ok) {
+        setStatus(payload.error ?? "Nie udało się odświeżyć danych Fitssey.");
+        return;
+      }
+      await load();
+      setStatus("Dane Fitssey zostały odświeżone.");
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -148,9 +171,12 @@ export default function SettingsPage() {
             </div>
             <div className="text-xs text-muted-foreground">Status: {lastImportStatus ?? "brak"}</div>
 
-            <div className="flex items-center gap-2">
-              <Button onClick={save} disabled={isSaving}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button onClick={save} disabled={isSaving || isRefreshing}>
                 {isSaving ? "Zapisywanie..." : "Zapisz ustawienia"}
+              </Button>
+              <Button onClick={refreshFitsseyData} disabled={isSaving || isRefreshing} variant="ghost">
+                {isRefreshing ? "Odświeżanie..." : "Odśwież dane Fitssey"}
               </Button>
               {status && <span className="text-xs text-muted-foreground">{status}</span>}
             </div>
