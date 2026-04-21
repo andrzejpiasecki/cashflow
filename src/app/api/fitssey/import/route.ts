@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db";
-import { syncFitsseyClientsCache } from "@/lib/fitssey-clients";
 import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
 type FitsseyAuthMode = "apiKey";
@@ -19,6 +18,14 @@ type FitsseySalesRow = {
   itemName?: string;
   itemTotalPrice?: number | string;
   itemPrice?: number | string;
+  userGuid?: string;
+  clientUuid?: string;
+  userFullName?: string;
+  userEmail?: string;
+  email?: string;
+  userPhone?: string;
+  phone?: string;
+  phoneNumber?: string;
   vatRate?: number | string;
   itemVatRate?: number | string;
   taxRate?: number | string;
@@ -35,6 +42,10 @@ function hasFitsseySettingsDelegate() {
   return "fitsseySettings" in (db as unknown as Record<string, unknown>);
 }
 
+function hasFitsseySaleDelegate() {
+  return "fitsseySale" in (db as unknown as Record<string, unknown>);
+}
+
 async function updateImportStatus(status: string, importedAt?: Date) {
   if (!hasFitsseySettingsDelegate()) return;
   await db.fitsseySettings.updateMany({
@@ -43,8 +54,98 @@ async function updateImportStatus(status: string, importedAt?: Date) {
   });
 }
 
-function getMonthKey(date: Date) {
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+function getMonthKeyFromRawSaleDate(rawDate: unknown) {
+  const text = String(rawDate ?? "").trim();
+  const explicit = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (explicit) {
+    const [, year, month] = explicit;
+    return `${year}-${month}`;
+  }
+
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function getDayKeyFromRawSaleDate(rawDate: unknown) {
+  const text = String(rawDate ?? "").trim();
+  const explicit = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (explicit) {
+    const [, year, month, day] = explicit;
+    return `${year}-${month}-${day}`;
+  }
+
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+}
+
+function safeText(value: unknown) {
+  return String(value ?? "").trim();
+}
+
+function normalizeEmail(value: unknown) {
+  const email = safeText(value).toLowerCase();
+  if (!email || !email.includes("@")) return null;
+  return email;
+}
+
+function normalizePhone(value: unknown) {
+  const raw = safeText(value);
+  if (!raw) return null;
+  const cleaned = raw.replace(/[^\d+]/g, "");
+  return cleaned.length >= 6 ? cleaned : null;
+}
+
+function mapSalesRowsForCache(rows: FitsseySalesRow[]) {
+  return rows.flatMap((row) => {
+    const saleDate = new Date(row.saleDate ?? "");
+    if (Number.isNaN(saleDate.getTime())) return [];
+
+    const saleMonthKey = getMonthKeyFromRawSaleDate(row.saleDate);
+    const saleDayKey = getDayKeyFromRawSaleDate(row.saleDate);
+    if (!saleMonthKey || !saleDayKey) return [];
+
+    const itemTotalPrice = Number(row.itemTotalPrice);
+    const itemPrice = Number(row.itemPrice);
+    const amountMinor = Number.isFinite(itemTotalPrice) ? itemTotalPrice : itemPrice;
+    const amount = Number.isFinite(amountMinor) ? amountMinor / 100 : 0;
+    if (!Number.isFinite(amount) || amount <= 0) return [];
+
+    return [{
+      userId: SHARED_SCOPE_ID,
+      saleDate,
+      saleDayKey,
+      saleMonthKey,
+      itemName: safeText(row.itemName) || "Produkt",
+      amount,
+      userGuid: safeText(row.userGuid) || null,
+      clientUuid: safeText(row.clientUuid) || null,
+      userFullName: safeText(row.userFullName) || "Nieznany klient",
+      userEmail: normalizeEmail(row.userEmail ?? row.email),
+      userPhone: normalizePhone(row.userPhone ?? row.phone ?? row.phoneNumber),
+    }];
+  });
+}
+
+async function replaceFitsseySalesCache(rows: FitsseySalesRow[]) {
+  if (!hasFitsseySaleDelegate()) return;
+  const mapped = mapSalesRowsForCache(rows);
+
+  await db.$transaction(async (tx) => {
+    await tx.fitsseySale.deleteMany({
+      where: { userId: SHARED_SCOPE_ID },
+    });
+
+    if (mapped.length === 0) return;
+
+    const chunkSize = 500;
+    for (let start = 0; start < mapped.length; start += chunkSize) {
+      await tx.fitsseySale.createMany({
+        data: mapped.slice(start, start + chunkSize),
+      });
+    }
+  });
 }
 
 async function resolveAuthConfig(): Promise<FitsseyAuthConfig> {
@@ -159,8 +260,8 @@ function aggregateRevenueByProductAndMonth(rows: FitsseySalesRow[]) {
   for (const row of rows) {
     const rawProduct = (row.itemName ?? "").trim() || "Produkt";
     const product = normalizeName(rawProduct);
-    const date = new Date(row.saleDate ?? "");
-    if (Number.isNaN(date.getTime())) continue;
+    const month = getMonthKeyFromRawSaleDate(row.saleDate);
+    if (!month) continue;
 
     const itemTotalPrice = Number(row.itemTotalPrice);
     const itemPrice = Number(row.itemPrice);
@@ -168,7 +269,6 @@ function aggregateRevenueByProductAndMonth(rows: FitsseySalesRow[]) {
     const amount = Number.isFinite(amountMinor) ? amountMinor / 100 : 0;
     if (!Number.isFinite(amount) || amount === 0) continue;
 
-    const month = getMonthKey(date);
     const record = map.get(product) ?? { name: product, monthValues: {}, vatRateVotes: {} };
     const monthValues = record.monthValues;
     monthValues[month] = (monthValues[month] ?? 0) + amount;
@@ -210,38 +310,21 @@ export async function POST(request: Request) {
   try {
     const body = (await request.json().catch(() => ({}))) as { auto?: boolean };
     const isAutoImport = body.auto === true;
-    const config = await resolveAuthConfig();
-    const now = new Date();
-    const settings = (await db.fitsseySettings.findUnique({ where: { userId: SHARED_SCOPE_ID } }))
-      ?? (await db.fitsseySettings.findFirst({ orderBy: { updatedAt: "desc" } }));
 
-    if (isAutoImport && settings?.lastImportedAt) {
-      const cooldownMinutes = Math.max(30, settings.autoImportIntervalMins || 180);
-      const cooldownMs = cooldownMinutes * 60 * 1000;
-      const elapsedMs = Date.now() - settings.lastImportedAt.getTime();
-      if (elapsedMs < cooldownMs) {
-        const nextImportAt = new Date(settings.lastImportedAt.getTime() + cooldownMs);
-        return NextResponse.json({
-          skipped: true,
-          reason: "cooldown",
-          nextImportAt: nextImportAt.toISOString(),
-          cooldownMinutes,
-        });
-      }
+    if (isAutoImport) {
+      return NextResponse.json({
+        skipped: true,
+        reason: "manual_only",
+      });
     }
 
+    const config = await resolveAuthConfig();
+    const now = new Date();
     const startDate = config.startDate || DEFAULT_START_DATE;
     const endDate = now.toISOString().slice(0, 10);
     const rows = await fetchSalesRows(config, startDate, endDate);
+    await replaceFitsseySalesCache(rows);
     const aggregated = aggregateRevenueByProductAndMonth(rows);
-    let clientsSyncInfo = "";
-    try {
-      const clientsSync = await syncFitsseyClientsCache(config.studioUuid, config.apiKey);
-      clientsSyncInfo = `, clients=${clientsSync.upserted}`;
-    } catch (error) {
-      clientsSyncInfo = ", clients=sync_error";
-      console.error("Fitssey clients cache sync failed:", error);
-    }
 
     if (aggregated.size === 0) {
       await updateImportStatus("ok: 0 produktów", new Date());
@@ -349,7 +432,7 @@ export async function POST(request: Request) {
       deletedDuplicates += deleted.count;
     }
 
-    await updateImportStatus(`ok: products=${aggregated.size}, created=${created}, updated=${updated}, removed=${deletedDuplicates}${clientsSyncInfo}`, new Date());
+    await updateImportStatus(`ok: products=${aggregated.size}, created=${created}, updated=${updated}, removed=${deletedDuplicates}`, new Date());
 
     return NextResponse.json({ created, updated, products: aggregated.size, removed: deletedDuplicates, skipped: false });
   } catch (error) {

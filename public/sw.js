@@ -1,4 +1,4 @@
-const CACHE_NAME = "cashflow-real-v3";
+const CACHE_NAME = "cashflow-real-v4";
 const PRECACHE_URLS = [
   "/manifest.webmanifest",
   "/icon-192.png",
@@ -24,6 +24,12 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
+});
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET") return;
@@ -33,22 +39,21 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/")) return;
   if (url.pathname.startsWith("/_next/")) return;
 
-  if (request.mode === "navigate") {
-    // Never cache auth-sensitive HTML navigations; let Clerk/Next resolve them live.
+  // This app values freshness over offline runtime caching.
+  // Keep SW only for installability + a tiny precache of icons/manifest.
+  if (!PRECACHE_URLS.includes(url.pathname)) {
     event.respondWith(fetch(request));
     return;
   }
 
   event.respondWith(
     caches.match(request).then((cached) => {
-      const networkFetch = fetch(request)
-        .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-          return response;
-        })
-        .catch(() => cached);
-      return cached || networkFetch;
+      if (cached) return cached;
+      return fetch(request).then((response) => {
+        const copy = response.clone();
+        void caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+        return response;
+      });
     }),
   );
 });

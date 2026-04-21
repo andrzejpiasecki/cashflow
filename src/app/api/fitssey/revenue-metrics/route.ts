@@ -4,112 +4,129 @@ import { auth } from "@clerk/nextjs/server";
 import { db } from "@/lib/db";
 import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
-type SalesRow = {
-  saleDate?: string;
-  itemTotalPrice?: number | string;
-  itemPrice?: number | string;
-};
+const BUSINESS_TIME_ZONE = "Europe/Warsaw";
 
-const FITSSEY_BASE_URL_TEMPLATE = "https://app.fitssey.com/{uuid}/api/v4/public";
-const PAGE_SIZE = 200;
-const DEFAULT_START_DATE = "2025-10-01";
-
-function getFitsseySettingsDelegate() {
-  return (db as unknown as { fitsseySettings?: typeof db.fitsseySettings }).fitsseySettings;
+function getFitsseySaleDelegate() {
+  return (db as unknown as { fitsseySale?: typeof db.fitsseySale }).fitsseySale;
 }
 
-async function getFitsseyCredentials() {
-  const settingsDelegate = getFitsseySettingsDelegate();
-  if (!settingsDelegate) {
-    throw new Error("Brak delegata FitsseySettings.");
-  }
-
-  const settings = (await settingsDelegate.findUnique({ where: { userId: SHARED_SCOPE_ID } }))
-    ?? (await settingsDelegate.findFirst({ orderBy: { updatedAt: "desc" } }));
-  const studioUuid = settings?.studioUuid?.trim() || process.env.FITSSEY_STUDIO_UUID?.trim() || "";
-  const apiKey = settings?.apiKey?.trim() || process.env.FITSSEY_API_KEY?.trim() || "";
-  const startDate = settings?.startDate ? settings.startDate.toISOString().slice(0, 10) : process.env.FITSSEY_START_DATE?.trim() || DEFAULT_START_DATE;
-  if (!studioUuid || !apiKey) {
-    throw new Error("Brak konfiguracji Fitssey (studioUuid/apiKey).");
-  }
-  return { studioUuid, apiKey, startDate };
-}
-
-async function fetchSalesPage(baseUrl: string, headers: HeadersInit, startDate: string, endDate: string, page: number) {
-  const url = `${baseUrl}/report/finance/sales?startDate=${startDate}&endDate=${endDate}&page=${page}&count=${PAGE_SIZE}`;
-  const response = await fetch(url, {
-    method: "GET",
-    headers,
-    next: { revalidate: 900 },
+function getNowInTimeZone(timeZone: string) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
   });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Fitssey API ${response.status}: ${body.slice(0, 140)}`);
+  const parts = formatter.formatToParts(new Date());
+  const year = Number(parts.find((part) => part.type === "year")?.value);
+  const month = Number(parts.find((part) => part.type === "month")?.value);
+  const day = Number(parts.find((part) => part.type === "day")?.value);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    const fallback = new Date();
+    return { year: fallback.getFullYear(), month: fallback.getMonth() + 1, day: fallback.getDate() };
   }
-  return response.json() as Promise<unknown>;
+  return { year, month, day };
 }
 
-function mapSalesRow(row: SalesRow) {
-  const date = new Date(row.saleDate ?? "");
-  if (Number.isNaN(date.getTime())) return null;
-  const itemTotalPrice = Number(row.itemTotalPrice);
-  const itemPrice = Number(row.itemPrice);
-  const amountMinor = Number.isFinite(itemTotalPrice) ? itemTotalPrice : itemPrice;
-  const amount = Number.isFinite(amountMinor) ? amountMinor / 100 : 0;
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-  return { date, amount };
+function getComparableBounds() {
+  const now = getNowInTimeZone(BUSINESS_TIME_ZONE);
+  const currentMonthKey = `${now.year}-${String(now.month).padStart(2, "0")}`;
+  const currentStartKey = `${currentMonthKey}-01`;
+  const currentEndKey = `${currentMonthKey}-${String(now.day).padStart(2, "0")}`;
+
+  const previousMonth = new Date(now.year, now.month - 2, 1);
+  const previousMonthKey = `${previousMonth.getFullYear()}-${String(previousMonth.getMonth() + 1).padStart(2, "0")}`;
+  const previousStartKey = `${previousMonthKey}-01`;
+  const previousLastDay = new Date(previousMonth.getFullYear(), previousMonth.getMonth() + 1, 0).getDate();
+  const comparableDay = Math.min(now.day, previousLastDay);
+  const previousComparableEndKey = `${previousMonthKey}-${String(comparableDay).padStart(2, "0")}`;
+  const previousFullEndKey = `${previousMonthKey}-${String(previousLastDay).padStart(2, "0")}`;
+
+  return {
+    currentMonthKey,
+    previousMonthKey,
+    currentStartKey,
+    currentEndKey,
+    previousStartKey,
+    previousComparableEndKey,
+    previousFullEndKey,
+  };
 }
 
-async function fetchSalesRecords() {
-  const { studioUuid, apiKey, startDate } = await getFitsseyCredentials();
-  const endDate = new Date().toISOString().slice(0, 10);
-  const baseUrl = FITSSEY_BASE_URL_TEMPLATE.replace("{uuid}", encodeURIComponent(studioUuid));
-  const headers = { Accept: "application/json", Authorization: `Bearer ${apiKey}` };
+async function getImportedRevenueTotals(monthKeys: string[]) {
+  const importedRows = await db.flowRow.findMany({
+    where: { userId: SHARED_SCOPE_ID, type: "income", isImported: true },
+    select: { monthValues: true },
+  });
 
-  const first = await fetchSalesPage(baseUrl, headers, startDate, endDate, 1);
-  const rows: SalesRow[] = [];
-  if (Array.isArray(first)) {
-    rows.push(...first);
-  } else if (first && typeof first === "object" && Array.isArray((first as { collection?: SalesRow[] }).collection)) {
-    rows.push(...((first as { collection: SalesRow[] }).collection ?? []));
-    const pages = Number((first as { pages?: number }).pages) || 1;
-    for (let page = 2; page <= pages; page += 1) {
-      const next = await fetchSalesPage(baseUrl, headers, startDate, endDate, page);
-      if (Array.isArray(next)) rows.push(...next);
-      else if (next && typeof next === "object" && Array.isArray((next as { collection?: SalesRow[] }).collection)) {
-        rows.push(...((next as { collection: SalesRow[] }).collection ?? []));
-      }
+  const totals = new Map(monthKeys.map((monthKey) => [monthKey, 0]));
+  for (const row of importedRows) {
+    const monthValues = row.monthValues as Record<string, unknown>;
+    for (const monthKey of monthKeys) {
+      const rawValue = monthValues?.[monthKey];
+      const value = typeof rawValue === "number" ? rawValue : Number(rawValue) || 0;
+      if (!Number.isFinite(value) || value === 0) continue;
+      totals.set(monthKey, (totals.get(monthKey) || 0) + value);
     }
-  } else {
-    throw new Error("Nieprawidłowy format odpowiedzi Fitssey.");
   }
 
-  return rows.map(mapSalesRow).filter((record): record is { date: Date; amount: number } => Boolean(record));
+  return totals;
 }
 
-function buildComparableMonthToDateRevenue(records: { date: Date; amount: number }[]) {
-  const now = new Date();
-  const currentStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-  const currentEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-  const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const prevStart = new Date(prevMonth.getFullYear(), prevMonth.getMonth(), 1, 0, 0, 0, 0);
-  const prevLastDay = new Date(prevMonth.getFullYear(), prevMonth.getMonth() + 1, 0).getDate();
-  const comparableDay = Math.min(now.getDate(), prevLastDay);
-  const prevComparableEnd = new Date(prevMonth.getFullYear(), prevMonth.getMonth(), comparableDay, 23, 59, 59, 999);
-  const prevFullEnd = new Date(prevMonth.getFullYear(), prevMonth.getMonth() + 1, 0, 23, 59, 59, 999);
+async function getComparableRevenueMetrics() {
+  const bounds = getComparableBounds();
+  const fitsseySale = getFitsseySaleDelegate();
+  const salesRows = fitsseySale
+    ? await fitsseySale.findMany({
+      where: {
+        userId: SHARED_SCOPE_ID,
+        saleDayKey: {
+          gte: bounds.previousStartKey,
+          lte: bounds.currentEndKey,
+        },
+      },
+      select: {
+        saleDayKey: true,
+        amount: true,
+      },
+    })
+    : [];
 
-  const sumInRange = (start: Date, end: Date) =>
-    records.reduce((sum, row) => {
-      const t = row.date.getTime();
-      return t >= start.getTime() && t <= end.getTime() ? sum + row.amount : sum;
-    }, 0);
+  const importedTotals = await getImportedRevenueTotals([bounds.currentMonthKey, bounds.previousMonthKey]);
 
-  const currentPeriodRevenue = sumInRange(currentStart, currentEnd);
-  const previousPeriodRevenue = sumInRange(prevStart, prevComparableEnd);
-  const previousFullMonthRevenue = sumInRange(prevStart, prevFullEnd);
-  const revenueMoMChange = previousPeriodRevenue > 0 ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100 : null;
+  let currentPeriodRevenue = 0;
+  let previousPeriodRevenue = 0;
+  let previousFullMonthRevenue = 0;
 
-  return { currentPeriodRevenue, previousPeriodRevenue, previousFullMonthRevenue, revenueMoMChange };
+  for (const row of salesRows) {
+    if (row.saleDayKey >= bounds.currentStartKey && row.saleDayKey <= bounds.currentEndKey) {
+      currentPeriodRevenue += row.amount;
+    }
+    if (row.saleDayKey >= bounds.previousStartKey && row.saleDayKey <= bounds.previousComparableEndKey) {
+      previousPeriodRevenue += row.amount;
+    }
+    if (row.saleDayKey >= bounds.previousStartKey && row.saleDayKey <= bounds.previousFullEndKey) {
+      previousFullMonthRevenue += row.amount;
+    }
+  }
+
+  if (salesRows.length === 0) {
+    currentPeriodRevenue = importedTotals.get(bounds.currentMonthKey) || 0;
+    previousFullMonthRevenue = importedTotals.get(bounds.previousMonthKey) || 0;
+  }
+
+  currentPeriodRevenue = Math.round(currentPeriodRevenue);
+  previousPeriodRevenue = Math.round(previousPeriodRevenue);
+  previousFullMonthRevenue = Math.round(previousFullMonthRevenue);
+
+  return {
+    currentPeriodRevenue,
+    previousPeriodRevenue,
+    previousFullMonthRevenue,
+    revenueMoMChange: previousPeriodRevenue > 0
+      ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100
+      : null,
+  };
 }
 
 export async function GET() {
@@ -119,8 +136,7 @@ export async function GET() {
   }
 
   try {
-    const records = await fetchSalesRecords();
-    return NextResponse.json(buildComparableMonthToDateRevenue(records));
+    return NextResponse.json(await getComparableRevenueMetrics());
   } catch (error) {
     const message = error instanceof Error ? error.message : "Nie udało się pobrać metryk przychodu.";
     return NextResponse.json({ error: message }, { status: 500 });

@@ -2,27 +2,13 @@ import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db";
-import { getCachedFitsseyClients, syncFitsseyClientEntriesForUsers, syncFitsseyClientsCache } from "@/lib/fitssey-clients";
+import { getCachedFitsseyClients } from "@/lib/fitssey-clients";
 import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
-
-type SalesRow = {
-  saleDate?: string;
-  itemName?: string;
-  itemTotalPrice?: number | string;
-  itemPrice?: number | string;
-  userGuid?: string;
-  clientUuid?: string;
-  userFullName?: string;
-  userEmail?: string;
-  email?: string;
-  userPhone?: string;
-  phone?: string;
-  phoneNumber?: string;
-};
 
 type SalesRecord = {
   date: Date;
   month: string;
+  dayKey: string;
   clientName: string;
   clientKey: string;
   clientGuid: string | null;
@@ -34,20 +20,14 @@ type SalesRecord = {
   isPass: boolean;
 };
 
-const FITSSEY_BASE_URL_TEMPLATE = "https://app.fitssey.com/{uuid}/api/v4/public";
-const PAGE_SIZE = 200;
-const DEFAULT_START_DATE = "2025-10-01";
+const BUSINESS_TIME_ZONE = "Europe/Warsaw";
 
 function getFitsseySettingsDelegate() {
   return (db as unknown as { fitsseySettings?: typeof db.fitsseySettings }).fitsseySettings;
 }
 
-function toMonthKey(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-}
-
-function toDayKey(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+function getFitsseySaleDelegate() {
+  return (db as unknown as { fitsseySale?: typeof db.fitsseySale }).fitsseySale;
 }
 
 function createMonthlyObject(months: string[], initialValue: number) {
@@ -62,19 +42,6 @@ function normalizeName(value: unknown) {
   return safeText(value).replace(/\s+/g, " ").toLowerCase();
 }
 
-function normalizeEmail(value: unknown) {
-  const email = safeText(value).toLowerCase();
-  if (!email || !email.includes("@")) return null;
-  return email;
-}
-
-function normalizePhone(value: unknown) {
-  const raw = safeText(value);
-  if (!raw) return null;
-  const cleaned = raw.replace(/[^\d+]/g, "");
-  return cleaned.length >= 6 ? cleaned : null;
-}
-
 function isPassProduct(product: string) {
   const normalized = product.toLowerCase();
   return /karnet|pass|pakiet/.test(normalized)
@@ -82,103 +49,27 @@ function isPassProduct(product: string) {
     || /\d+\s*\+\s*\d+/.test(normalized);
 }
 
-async function getFitsseyCredentials() {
-  const settingsDelegate = getFitsseySettingsDelegate();
-  if (!settingsDelegate) {
-    throw new Error("Brak delegata FitsseySettings.");
-  }
-
-  const settings = (await settingsDelegate.findUnique({ where: { userId: SHARED_SCOPE_ID } }))
-    ?? (await settingsDelegate.findFirst({ orderBy: { updatedAt: "desc" } }));
-  const studioUuid = settings?.studioUuid?.trim() || process.env.FITSSEY_STUDIO_UUID?.trim() || "";
-  const apiKey = settings?.apiKey?.trim() || process.env.FITSSEY_API_KEY?.trim() || "";
-  const startDate = settings?.startDate ? settings.startDate.toISOString().slice(0, 10) : process.env.FITSSEY_START_DATE?.trim() || DEFAULT_START_DATE;
-  if (!studioUuid || !apiKey) {
-    throw new Error("Brak konfiguracji Fitssey (studioUuid/apiKey).");
-  }
-  return { studioUuid, apiKey, startDate };
-}
-
-async function fetchSalesPage(baseUrl: string, headers: HeadersInit, startDate: string, endDate: string, page: number) {
-  const url = `${baseUrl}/report/finance/sales?startDate=${startDate}&endDate=${endDate}&page=${page}&count=${PAGE_SIZE}`;
-  const response = await fetch(url, {
-    method: "GET",
-    headers,
-    // Paginated financial data must be fetched from a consistent snapshot.
-    // Per-page revalidation can mix stale and fresh pages and skew historical metrics.
-    cache: "no-store",
+function getNowInTimeZone(timeZone: string) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
   });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Fitssey API ${response.status}: ${body.slice(0, 140)}`);
+  const parts = formatter.formatToParts(new Date());
+  const year = Number(parts.find((part) => part.type === "year")?.value);
+  const month = Number(parts.find((part) => part.type === "month")?.value);
+  const day = Number(parts.find((part) => part.type === "day")?.value);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    const fallback = new Date();
+    return { year: fallback.getFullYear(), month: fallback.getMonth() + 1, day: fallback.getDate() };
   }
-  return response.json() as Promise<unknown>;
-}
-
-function mapSalesRow(row: SalesRow): SalesRecord | null {
-  const date = new Date(row.saleDate ?? "");
-  if (Number.isNaN(date.getTime())) return null;
-  const itemTotalPrice = Number(row.itemTotalPrice);
-  const itemPrice = Number(row.itemPrice);
-  const amountMinor = Number.isFinite(itemTotalPrice) ? itemTotalPrice : itemPrice;
-  const amount = Number.isFinite(amountMinor) ? amountMinor / 100 : 0;
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-  const product = safeText(row.itemName) || "Produkt";
-  const clientName = safeText(row.userFullName) || "Nieznany klient";
-  const clientGuid = safeText(row.userGuid) || null;
-  const clientUuid = safeText(row.clientUuid) || null;
-  const clientEmail = normalizeEmail(row.userEmail ?? row.email);
-  const clientPhone = normalizePhone(row.userPhone ?? row.phone ?? row.phoneNumber);
-  const clientKey = clientGuid?.toLowerCase()
-    || clientUuid?.toLowerCase()
-    || (clientEmail ? `email:${clientEmail}` : null)
-    || (clientPhone ? `phone:${clientPhone}` : null)
-    || `name:${normalizeName(clientName)}`;
-  return {
-    date,
-    month: toMonthKey(date),
-    clientName,
-    clientKey,
-    clientGuid,
-    clientUuid,
-    clientEmail,
-    clientPhone,
-    product,
-    amount,
-    isPass: isPassProduct(product),
-  };
-}
-
-async function fetchSalesRecords() {
-  const { studioUuid, apiKey, startDate } = await getFitsseyCredentials();
-  const endDate = new Date().toISOString().slice(0, 10);
-  const baseUrl = FITSSEY_BASE_URL_TEMPLATE.replace("{uuid}", encodeURIComponent(studioUuid));
-  const headers = { Accept: "application/json", Authorization: `Bearer ${apiKey}` };
-
-  const first = await fetchSalesPage(baseUrl, headers, startDate, endDate, 1);
-  const rows: SalesRow[] = [];
-  if (Array.isArray(first)) {
-    rows.push(...first);
-  } else if (first && typeof first === "object" && Array.isArray((first as { collection?: SalesRow[] }).collection)) {
-    rows.push(...((first as { collection: SalesRow[] }).collection ?? []));
-    const pages = Number((first as { pages?: number }).pages) || 1;
-    for (let page = 2; page <= pages; page += 1) {
-      const next = await fetchSalesPage(baseUrl, headers, startDate, endDate, page);
-      if (Array.isArray(next)) rows.push(...next);
-      else if (next && typeof next === "object" && Array.isArray((next as { collection?: SalesRow[] }).collection)) {
-        rows.push(...((next as { collection: SalesRow[] }).collection ?? []));
-      }
-    }
-  } else {
-    throw new Error("Nieprawidłowy format odpowiedzi Fitssey.");
-  }
-
-  return rows.map(mapSalesRow).filter((record): record is SalesRecord => Boolean(record)).sort((a, b) => a.date.getTime() - b.date.getTime());
+  return { year, month, day };
 }
 
 async function getImportedRevenueSnapshot() {
   const rows = await db.flowRow.findMany({
-    where: { type: "income", isImported: true },
+    where: { userId: SHARED_SCOPE_ID, type: "income", isImported: true },
     select: { name: true, monthValues: true },
   });
 
@@ -201,15 +92,53 @@ async function getImportedRevenueSnapshot() {
   return { revenueByMonth, mrrByMonth };
 }
 
+async function getCachedSalesRecords(): Promise<SalesRecord[]> {
+  const fitsseySale = getFitsseySaleDelegate();
+  if (!fitsseySale) return [];
+
+  const rows = await fitsseySale.findMany({
+    where: { userId: SHARED_SCOPE_ID },
+    orderBy: { saleDate: "asc" },
+  });
+
+  return rows.map((row) => {
+    const clientGuid = safeText(row.userGuid) || null;
+    const clientUuid = safeText(row.clientUuid) || null;
+    const clientEmail = safeText(row.userEmail).toLowerCase() || null;
+    const clientPhone = safeText(row.userPhone) || null;
+    const clientName = safeText(row.userFullName) || "Nieznany klient";
+    const clientKey = clientGuid?.toLowerCase()
+      || clientUuid?.toLowerCase()
+      || (clientEmail ? `email:${clientEmail}` : null)
+      || (clientPhone ? `phone:${clientPhone}` : null)
+      || `name:${normalizeName(clientName)}`;
+
+    return {
+      date: row.saleDate,
+      month: row.saleMonthKey,
+      dayKey: row.saleDayKey,
+      clientName,
+      clientKey,
+      clientGuid,
+      clientUuid,
+      clientEmail,
+      clientPhone,
+      product: row.itemName,
+      amount: row.amount,
+      isPass: isPassProduct(row.itemName),
+    };
+  });
+}
+
 function buildDailyRevenueSeries(records: SalesRecord[]) {
   const byDay = new Map<string, number>();
   for (const row of records) {
-    const dayKey = toDayKey(row.date);
-    byDay.set(dayKey, (byDay.get(dayKey) || 0) + row.amount);
+    byDay.set(row.dayKey, (byDay.get(row.dayKey) || 0) + row.amount);
   }
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth();
+
+  const now = getNowInTimeZone(BUSINESS_TIME_ZONE);
+  const year = now.year;
+  const month = now.month - 1;
   const prevMonthDate = new Date(year, month - 1, 1);
   const prevYear = prevMonthDate.getFullYear();
   const prevMonth = prevMonthDate.getMonth();
@@ -228,28 +157,35 @@ function buildDailyRevenueSeries(records: SalesRecord[]) {
 }
 
 function buildComparableMonthToDateRevenue(records: SalesRecord[]) {
-  const now = new Date();
-  const currentStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-  const currentEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-  const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const prevStart = new Date(prevMonth.getFullYear(), prevMonth.getMonth(), 1, 0, 0, 0, 0);
+  const now = getNowInTimeZone(BUSINESS_TIME_ZONE);
+  const currentMonthKey = `${now.year}-${String(now.month).padStart(2, "0")}`;
+  const currentStartKey = `${currentMonthKey}-01`;
+  const currentEndKey = `${currentMonthKey}-${String(now.day).padStart(2, "0")}`;
+
+  const prevMonth = new Date(now.year, now.month - 2, 1);
+  const previousMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, "0")}`;
   const prevLastDay = new Date(prevMonth.getFullYear(), prevMonth.getMonth() + 1, 0).getDate();
-  const comparableDay = Math.min(now.getDate(), prevLastDay);
-  const prevComparableEnd = new Date(prevMonth.getFullYear(), prevMonth.getMonth(), comparableDay, 23, 59, 59, 999);
-  const prevFullEnd = new Date(prevMonth.getFullYear(), prevMonth.getMonth() + 1, 0, 23, 59, 59, 999);
+  const comparableDay = Math.min(now.day, prevLastDay);
+  const prevStartKey = `${previousMonthKey}-01`;
+  const prevComparableEndKey = `${previousMonthKey}-${String(comparableDay).padStart(2, "0")}`;
+  const prevFullEndKey = `${previousMonthKey}-${String(prevLastDay).padStart(2, "0")}`;
 
-  const sumInRange = (start: Date, end: Date) =>
-    records.reduce((sum, row) => {
-      const t = row.date.getTime();
-      return t >= start.getTime() && t <= end.getTime() ? sum + row.amount : sum;
-    }, 0);
+  const sumByDayRange = (startKey: string, endKey: string) =>
+    records.reduce((sum, row) => (row.dayKey >= startKey && row.dayKey <= endKey ? sum + row.amount : sum), 0);
 
-  const currentPeriodRevenue = sumInRange(currentStart, currentEnd);
-  const previousPeriodRevenue = sumInRange(prevStart, prevComparableEnd);
-  const previousFullMonthRevenue = sumInRange(prevStart, prevFullEnd);
+  const currentPeriodRevenue = sumByDayRange(currentStartKey, currentEndKey);
+  const previousPeriodRevenue = sumByDayRange(prevStartKey, prevComparableEndKey);
+  const previousFullMonthRevenue = sumByDayRange(prevStartKey, prevFullEndKey);
   const revenueMoMChange = previousPeriodRevenue > 0 ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100 : null;
 
-  return { currentPeriodRevenue, previousPeriodRevenue, previousFullMonthRevenue, revenueMoMChange };
+  return {
+    currentMonthKey,
+    previousMonthKey,
+    currentPeriodRevenue,
+    previousPeriodRevenue,
+    previousFullMonthRevenue,
+    revenueMoMChange,
+  };
 }
 
 function buildClientsSummary(records: SalesRecord[], months: string[]) {
@@ -326,7 +262,8 @@ function buildAnalytics(
     if (nameKey) clientsByName.set(nameKey, contact);
   }
 
-  const months = [...new Set(records.map((row) => row.month))].sort();
+  const importedMonths = importedSnapshot ? [...new Set([...importedSnapshot.revenueByMonth.keys(), ...importedSnapshot.mrrByMonth.keys()])] : [];
+  const months = [...new Set([...records.map((row) => row.month), ...importedMonths])].sort();
   const latestMonth = months.at(-1) ?? null;
   const previousMonth = months.length > 1 ? months.at(-2) ?? null : null;
   const revenueByMonth = createMonthlyObject(months, 0);
@@ -387,6 +324,7 @@ function buildAnalytics(
       phone: string | null;
     }
   >();
+
   for (let i = 0; i < months.length; i += 1) {
     const month = months[i];
     activeClientsByMonth[month] = uniqueClientsByMonth[month].size;
@@ -408,9 +346,12 @@ function buildAnalytics(
   const latestActive = latestMonth ? activeClientsByMonth[latestMonth] || 0 : 0;
   const latestChurn = latestMonth ? churnByMonth[latestMonth] || 0 : 0;
   const latestMrr = latestMonth ? mrrByMonth[latestMonth] || 0 : 0;
-  const currentPeriodRevenue = latestMonth ? revenueByMonth[latestMonth] || 0 : comparable.currentPeriodRevenue;
-  const previousPeriodRevenue = comparable.previousPeriodRevenue;
-  const previousFullMonthRevenue = previousMonth ? revenueByMonth[previousMonth] || 0 : comparable.previousFullMonthRevenue;
+  const currentImportedRevenue = importedSnapshot ? Math.round(importedSnapshot.revenueByMonth.get(comparable.currentMonthKey) || 0) : 0;
+  const previousImportedRevenue = importedSnapshot ? Math.round(importedSnapshot.revenueByMonth.get(comparable.previousMonthKey) || 0) : 0;
+  const hasComparableSales = records.some((row) => row.month === comparable.currentMonthKey || row.month === comparable.previousMonthKey);
+  const currentPeriodRevenue = hasComparableSales ? comparable.currentPeriodRevenue : currentImportedRevenue;
+  const previousPeriodRevenue = hasComparableSales ? comparable.previousPeriodRevenue : 0;
+  const previousFullMonthRevenue = hasComparableSales ? comparable.previousFullMonthRevenue : previousImportedRevenue;
   const revenueMoMChange = previousPeriodRevenue > 0 ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100 : null;
 
   for (const row of records) {
@@ -472,7 +413,6 @@ function buildAnalytics(
       const expectedCycleDays = client.lastPassPurchaseDate ? estimatePassCycleDays(client.passPurchaseDates) : null;
       const hasPassLatest = latestMonth ? client.passMonths.has(latestMonth) : false;
       const hasPurchaseLatest = latestMonth ? client.purchaseMonths.has(latestMonth) : false;
-      // "Jednorazowe wejscie bez konwersji" only for clients that never bought a pass.
       const hasNotConvertedSingle = client.lastSingleEntryDate && client.passPurchaseDates.length === 0;
 
       let score = 0;
@@ -483,10 +423,10 @@ function buildAnalytics(
           score = 0;
           reason = "";
         } else {
-        const freshness = getFreshnessWeight(daysSinceLastSingle);
-        const recencyBonus = daysSinceLastSingle <= 45 ? 14 : daysSinceLastSingle <= 90 ? 8 : 0;
-        score = (34 + Math.min(12, client.singleEntryCount * 2) + recencyBonus) * freshness;
-        reason = "Jednorazowe wejscie bez konwersji na karnet";
+          const freshness = getFreshnessWeight(daysSinceLastSingle);
+          const recencyBonus = daysSinceLastSingle <= 45 ? 14 : daysSinceLastSingle <= 90 ? 8 : 0;
+          score = (34 + Math.min(12, client.singleEntryCount * 2) + recencyBonus) * freshness;
+          reason = "Jednorazowe wejscie bez konwersji na karnet";
         }
       } else if (client.lastPassPurchaseDate && !hasPassLatest && daysSinceLastPass !== null) {
         if (client.activeEntries !== null && client.activeEntries > 1) {
@@ -536,7 +476,6 @@ function buildAnalytics(
     .filter((client) => {
       if (!client.reason) return false;
       const isSingleEntryLead = client.reason.toLowerCase().includes("jednoraz");
-      // Sales view should include a broader pool of single-entry leads.
       if (isSingleEntryLead) return client.score >= 6;
       return client.score >= 12;
     })
@@ -607,29 +546,19 @@ export async function GET() {
   }
 
   try {
-    const credentials = await getFitsseyCredentials();
+    const settingsDelegate = getFitsseySettingsDelegate();
+    const settings = settingsDelegate
+      ? (await settingsDelegate.findUnique({ where: { userId: SHARED_SCOPE_ID } }))
+        ?? (await settingsDelegate.findFirst({ orderBy: { updatedAt: "desc" } }))
+      : null;
+    const studioUuid = settings?.studioUuid?.trim() || process.env.FITSSEY_STUDIO_UUID?.trim() || "";
     const cachedClients = await getCachedFitsseyClients();
-    // Never block dashboard render on client-cache sync.
-    if (cachedClients.length === 0) {
-      void Promise.resolve(credentials)
-        .then((c) => syncFitsseyClientsCache(c.studioUuid, c.apiKey))
-        .catch((error) => {
-          console.error("Fitssey clients async cache sync failed:", error);
-        });
-    }
-    const records = await fetchSalesRecords();
-    const leadUsersToRefresh = records
-      .slice(-320)
-      .map((row) => ({ externalGuid: row.clientGuid ?? "", clientUuid: row.clientUuid }))
-      .filter((row) => row.externalGuid);
-    void syncFitsseyClientEntriesForUsers(credentials.studioUuid, credentials.apiKey, leadUsersToRefresh).catch((error) => {
-      console.error("Fitssey entries async cache sync failed:", error);
-    });
+    const records = await getCachedSalesRecords();
     const importedSnapshot = await getImportedRevenueSnapshot();
     const analytics = buildAnalytics(records, cachedClients, importedSnapshot);
     return NextResponse.json({
       ...analytics,
-      studioUuid: credentials.studioUuid,
+      studioUuid,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Dashboard fetch failed.";

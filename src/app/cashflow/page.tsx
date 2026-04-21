@@ -51,6 +51,12 @@ type InfoPopoverPosition = {
   placement: "above" | "below";
 };
 
+type CashflowSettingsPayload = {
+  accountBalance: number | null;
+  accountBalanceMonth: string | null;
+  error?: string;
+};
+
 const money = new Intl.NumberFormat("pl-PL", {
   style: "decimal",
   maximumFractionDigits: 0,
@@ -86,12 +92,37 @@ function getForecastMetrics(
   return { forecastBaseline, currentMonthForecastContribution };
 }
 
+function isBalanceAdjustmentRow(row: FlowRow) {
+  return !row.isImported && row.name.toLowerCase().includes("stan konta");
+}
+
+function buildAnchoredValues(
+  months: string[],
+  source: Map<string, number>,
+  anchorMonth: string | null,
+  anchorValue: number | null,
+) {
+  if (anchorMonth === null || anchorValue === null || !source.has(anchorMonth)) {
+    return new Map(source);
+  }
+
+  const anchorSourceValue = source.get(anchorMonth) ?? 0;
+  const anchored = new Map<string, number>();
+  for (const month of months) {
+    const currentValue = source.get(month) ?? 0;
+    if (month < anchorMonth) {
+      anchored.set(month, currentValue);
+      continue;
+    }
+    anchored.set(month, anchorValue + (currentValue - anchorSourceValue));
+  }
+  return anchored;
+}
+
 export default function CashflowPage() {
   const { isLoaded, isSignedIn } = useAuth();
   const [rows, setRows] = useState<FlowRow[]>([]);
   const rowsRef = useRef<FlowRow[]>([]);
-  const isSyncingRef = useRef(false);
-  const lastAutoSyncAttemptRef = useRef(0);
   const desktopTableScrollRef = useRef<HTMLDivElement | null>(null);
   const hasAutoScrolledToCurrentMonthRef = useRef(false);
   const mobileMonthCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -108,6 +139,11 @@ export default function CashflowPage() {
   const [showCitInfo, setShowCitInfo] = useState(false);
   const [citInfoPosition, setCitInfoPosition] = useState<InfoPopoverPosition | null>(null);
   const [dashboardRevenueMoMChange, setDashboardRevenueMoMChange] = useState<number | null>(null);
+  const [accountBalanceValue, setAccountBalanceValue] = useState(0);
+  const [accountBalanceMonth, setAccountBalanceMonth] = useState(monthKeyFromDate(new Date()));
+  const [hasAccountBalanceAnchor, setHasAccountBalanceAnchor] = useState(false);
+  const [accountBalanceStatus, setAccountBalanceStatus] = useState("");
+  const [isSavingAccountBalance, setIsSavingAccountBalance] = useState(false);
 
   useEffect(() => {
     if (!fillModal) return;
@@ -166,6 +202,20 @@ export default function CashflowPage() {
       }
     };
 
+    const loadCashflowSettings = async () => {
+      try {
+        const response = await fetch("/api/settings/cashflow");
+        if (!response.ok) return;
+        const payload = (await response.json()) as CashflowSettingsPayload;
+        if (!isMounted) return;
+        setHasAccountBalanceAnchor(payload.accountBalance !== null && typeof payload.accountBalanceMonth === "string");
+        setAccountBalanceValue(typeof payload.accountBalance === "number" ? payload.accountBalance : 0);
+        setAccountBalanceMonth(payload.accountBalanceMonth || monthKeyFromDate(new Date()));
+      } catch {
+        // keep defaults
+      }
+    };
+
     const loadRevenueMetrics = async () => {
       try {
         const response = await fetch("/api/fitssey/revenue-metrics");
@@ -178,47 +228,13 @@ export default function CashflowPage() {
       }
     };
 
-    const backgroundSync = async () => {
-      if (isSyncingRef.current) return;
-      const nowMs = Date.now();
-      if (nowMs - lastAutoSyncAttemptRef.current < 30_000) return;
-      lastAutoSyncAttemptRef.current = nowMs;
-      isSyncingRef.current = true;
-      try {
-        await fetch("/api/fitssey/import", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ auto: true }),
-        });
-        await Promise.all([loadRows(false), loadRevenueMetrics()]);
-      } catch {
-        // Silent background sync.
-      } finally {
-        isSyncingRef.current = false;
-      }
-    };
-
-    const handleActivation = () => {
-      void backgroundSync();
-    };
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        void backgroundSync();
-      }
-    };
-
     void loadTaxSettings();
+    void loadCashflowSettings();
     void loadRevenueMetrics();
-    void loadRows(true).then(() => {
-      void backgroundSync();
-    });
-    window.addEventListener("focus", handleActivation);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
+    void loadRows(true);
 
     return () => {
       isMounted = false;
-      window.removeEventListener("focus", handleActivation);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [isLoaded, isSignedIn]);
 
@@ -243,28 +259,36 @@ export default function CashflowPage() {
   const displayEndMonth = months[months.length - 1]?.key ?? currentMonthKey;
 
   const timelineMonths = useMemo(() => {
-    const candidateMonths = rows.flatMap((row) => Object.keys(row.monthValues));
+    const candidateMonths = [
+      ...rows.flatMap((row) => Object.keys(row.monthValues)),
+      ...(hasAccountBalanceAnchor ? [accountBalanceMonth] : []),
+    ];
     const earliestMonth = candidateMonths.reduce((min, month) => (monthKeyToIndex(month) < monthKeyToIndex(min) ? month : min), displayStartMonth);
     return buildMonthRange(earliestMonth, displayEndMonth);
-  }, [rows, displayStartMonth, displayEndMonth]);
+  }, [rows, displayStartMonth, displayEndMonth, hasAccountBalanceAnchor, accountBalanceMonth]);
 
   const vatMonthBreakdown = useMemo(() => {
     const actualByMonth = timelineMonths.map((key) => {
-      const income = incomeRows.reduce((sum, row) => sum + getCellValue(row, key), 0);
+      const importedIncomeActual = incomeRows
+        .filter((row) => row.isImported)
+        .reduce((sum, row) => sum + getCellValue(row, key), 0);
+      const manualIncomeGrossTaxable = incomeRows
+        .filter((row) => !row.isImported && !isBalanceAdjustmentRow(row))
+        .reduce((sum, row) => sum + getCellValue(row, key), 0);
       const expenses = expenseRows.reduce((sum, row) => sum + getCellValue(row, key), 0);
-      return { key, income, expenses };
+      return { key, importedIncomeActual, manualIncomeGrossTaxable, expenses };
     });
 
-    const { forecastBaseline, currentMonthForecastContribution } = getForecastMetrics(actualByMonth, currentMonthKey, dashboardRevenueMoMChange);
+    const { forecastBaseline, currentMonthForecastContribution } = getForecastMetrics(
+      actualByMonth.map((month) => ({ key: month.key, income: month.importedIncomeActual, expenses: month.expenses })),
+      currentMonthKey,
+      dashboardRevenueMoMChange,
+    );
 
     return new Map(
       actualByMonth.map((month) => {
-        const manualIncomeGross = incomeRows
-          .filter((row) => !row.isImported)
-          .reduce((sum, row) => sum + getCellValue(row, month.key), 0);
-        const importedIncomeGrossActual = incomeRows
-          .filter((row) => row.isImported)
-          .reduce((sum, row) => sum + getCellValue(row, month.key), 0);
+        const manualIncomeGross = month.manualIncomeGrossTaxable;
+        const importedIncomeGrossActual = month.importedIncomeActual;
         const importedIncomeGrossEffective = month.key === currentMonthKey
           ? currentMonthForecastContribution
           : month.key > currentMonthKey
@@ -300,12 +324,24 @@ export default function CashflowPage() {
 
   const timelineComputed = useMemo(() => {
     const actualByMonth = timelineMonths.map((key) => {
-      const income = incomeRows.reduce((sum, row) => sum + getCellValue(row, key), 0);
+      const importedIncomeActual = incomeRows
+        .filter((row) => row.isImported)
+        .reduce((sum, row) => sum + getCellValue(row, key), 0);
+      const manualIncomeTaxable = incomeRows
+        .filter((row) => !row.isImported && !isBalanceAdjustmentRow(row))
+        .reduce((sum, row) => sum + getCellValue(row, key), 0);
+      const balanceAdjustmentIncome = incomeRows
+        .filter((row) => isBalanceAdjustmentRow(row))
+        .reduce((sum, row) => sum + getCellValue(row, key), 0);
       const expenses = expenseRows.reduce((sum, row) => sum + getCellValue(row, key), 0);
-      return { key, income, expenses };
+      return { key, importedIncomeActual, manualIncomeTaxable, balanceAdjustmentIncome, expenses };
     });
 
-    const { forecastBaseline, currentMonthForecastContribution } = getForecastMetrics(actualByMonth, currentMonthKey, dashboardRevenueMoMChange);
+    const { forecastBaseline, currentMonthForecastContribution } = getForecastMetrics(
+      actualByMonth.map((month) => ({ key: month.key, income: month.importedIncomeActual, expenses: month.expenses })),
+      currentMonthKey,
+      dashboardRevenueMoMChange,
+    );
 
     const computed = [];
     let cumulative = 0;
@@ -317,16 +353,19 @@ export default function CashflowPage() {
 
     for (let index = 0; index < actualByMonth.length; index += 1) {
       const month = actualByMonth[index];
-      const forecastIncome = month.key === currentMonthKey
+      const forecastImportedIncome = month.key === currentMonthKey
         ? currentMonthForecastContribution
         : month.key > currentMonthKey
           ? Math.round(forecastBaseline)
-          : month.income;
-      const effectiveIncome = month.key >= currentMonthKey ? forecastIncome : month.income;
+          : month.importedIncomeActual;
+      const taxableIncome = forecastImportedIncome + month.manualIncomeTaxable;
+      const legacyBalanceAdjustment = hasAccountBalanceAnchor ? 0 : month.balanceAdjustmentIncome;
+      const effectiveIncome = taxableIncome + legacyBalanceAdjustment;
       const balance = effectiveIncome - month.expenses;
+      const taxableBalance = taxableIncome - month.expenses;
       const year = Number(month.key.slice(0, 4));
       const prevProfitYtd = yearProfitYtd.get(year) ?? 0;
-      const nextProfitYtd = prevProfitYtd + balance;
+      const nextProfitYtd = prevProfitYtd + taxableBalance;
       yearProfitYtd.set(year, nextProfitYtd);
       const citBaseYtd = Math.max(nextProfitYtd, 0);
       const citDueYtd = citBaseYtd * (citRate / 100);
@@ -343,7 +382,8 @@ export default function CashflowPage() {
       computed.push({
         key: month.key,
         income: effectiveIncome,
-        forecastIncome,
+        taxableIncome,
+        forecastIncome: forecastImportedIncome,
         expenses: month.expenses,
         balance,
         cit,
@@ -356,7 +396,7 @@ export default function CashflowPage() {
     }
 
     return new Map(computed.map((month) => [month.key, month]));
-  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, citRate, vatMonthBreakdown, dashboardRevenueMoMChange]);
+  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, citRate, vatMonthBreakdown, dashboardRevenueMoMChange, hasAccountBalanceAnchor]);
 
   const taxInfoMonthKey = useMemo(() => {
     if (vatMonthBreakdown.has(currentMonthKey) || timelineComputed.has(currentMonthKey)) return currentMonthKey;
@@ -389,7 +429,10 @@ export default function CashflowPage() {
     () =>
       months.map((month) => {
         const computed = timelineComputed.get(month.key);
-        const actualIncome = incomeRows.reduce((sum, row) => sum + getCellValue(row, month.key), 0);
+        const actualIncome = incomeRows.reduce((sum, row) => {
+          if (hasAccountBalanceAnchor && isBalanceAdjustmentRow(row)) return sum;
+          return sum + getCellValue(row, month.key);
+        }, 0);
         return {
           key: month.key,
           income: month.key === currentMonthKey ? actualIncome : computed?.income ?? 0,
@@ -397,7 +440,7 @@ export default function CashflowPage() {
           balance: computed?.balance ?? 0,
         };
       }),
-    [months, timelineComputed, incomeRows, currentMonthKey],
+    [months, timelineComputed, incomeRows, currentMonthKey, hasAccountBalanceAnchor],
   );
 
   const forecastIncomeTotals = useMemo(
@@ -405,9 +448,19 @@ export default function CashflowPage() {
     [months, timelineComputed],
   );
 
+  const anchoredCumulativeByMonth = useMemo(
+    () => buildAnchoredValues(
+      timelineMonths,
+      new Map(timelineMonths.map((month) => [month, timelineComputed.get(month)?.cumulative ?? 0])),
+      hasAccountBalanceAnchor ? accountBalanceMonth : null,
+      hasAccountBalanceAnchor ? accountBalanceValue : null,
+    ),
+    [timelineMonths, timelineComputed, hasAccountBalanceAnchor, accountBalanceMonth, accountBalanceValue],
+  );
+
   const cumulativeBalances = useMemo(
-    () => months.map((month) => ({ key: month.key, value: timelineComputed.get(month.key)?.cumulative ?? 0 })),
-    [months, timelineComputed],
+    () => months.map((month) => ({ key: month.key, value: anchoredCumulativeByMonth.get(month.key) ?? 0 })),
+    [months, anchoredCumulativeByMonth],
   );
 
   const taxTotals = useMemo(
@@ -423,7 +476,7 @@ export default function CashflowPage() {
     const monthData = timelineComputed.get(taxInfoMonthKey);
     return {
       key: taxInfoMonthKey,
-      income: monthData?.income ?? 0,
+      income: monthData?.taxableIncome ?? 0,
       expenses: monthData?.expenses ?? 0,
       balance: monthData?.balance ?? 0,
       taxableBase: monthData?.citBaseYtd ?? 0,
@@ -432,10 +485,46 @@ export default function CashflowPage() {
     };
   }, [timelineComputed, taxInfoMonthKey]);
 
-  const cumulativeNetAfterTax = useMemo(
-    () => months.map((month) => ({ key: month.key, value: timelineComputed.get(month.key)?.cumulativeNet ?? 0 })),
-    [months, timelineComputed],
+  const anchoredCumulativeNetByMonth = useMemo(
+    () => buildAnchoredValues(
+      timelineMonths,
+      new Map(timelineMonths.map((month) => [month, timelineComputed.get(month)?.cumulativeNet ?? 0])),
+      hasAccountBalanceAnchor ? accountBalanceMonth : null,
+      hasAccountBalanceAnchor ? accountBalanceValue : null,
+    ),
+    [timelineMonths, timelineComputed, hasAccountBalanceAnchor, accountBalanceMonth, accountBalanceValue],
   );
+
+  const cumulativeNetAfterTax = useMemo(
+    () => months.map((month) => ({ key: month.key, value: anchoredCumulativeNetByMonth.get(month.key) ?? 0 })),
+    [months, anchoredCumulativeNetByMonth],
+  );
+
+  const saveAccountBalanceAnchor = async (clear = false) => {
+    setIsSavingAccountBalance(true);
+    setAccountBalanceStatus("");
+    try {
+      const response = await fetch("/api/settings/cashflow", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accountBalance: clear ? null : accountBalanceValue,
+          accountBalanceMonth: clear ? null : accountBalanceMonth,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as CashflowSettingsPayload;
+      if (!response.ok) {
+        setAccountBalanceStatus(payload.error ?? "Nie udało się zapisać stanu konta.");
+        return;
+      }
+      setHasAccountBalanceAnchor(!clear && payload.accountBalance !== null && typeof payload.accountBalanceMonth === "string");
+      setAccountBalanceValue(typeof payload.accountBalance === "number" ? payload.accountBalance : 0);
+      setAccountBalanceMonth(payload.accountBalanceMonth || monthKeyFromDate(new Date()));
+      setAccountBalanceStatus(clear ? "Stan konta został wyczyszczony." : "Stan konta zapisany.");
+    } finally {
+      setIsSavingAccountBalance(false);
+    }
+  };
 
   const addRow = (type: FlowType) => {
     const todayMonth = monthKeyFromDate(new Date());
@@ -623,6 +712,55 @@ export default function CashflowPage() {
           </div>
         </div>
 
+        <div className="rounded-sm border border-slate-300 bg-white px-3 py-3">
+          <div className="flex flex-col gap-3 xl:grid xl:grid-cols-[minmax(0,1fr)_auto] xl:items-end xl:gap-4">
+            <div className="max-w-2xl">
+              <p className="text-sm font-semibold text-slate-900">Stan konta</p>
+              <p className="text-xs text-muted-foreground">
+                Kotwiczy wiersze `Stan skumulowany` od wybranego miesiąca. Nie wpływa na przychody, CIT ani VAT.
+              </p>
+            </div>
+            <div className="grid w-full min-w-0 gap-2 sm:grid-cols-2 2xl:w-auto 2xl:grid-cols-[220px_180px_auto_auto]">
+              <label className="grid min-w-0 gap-1">
+                <span className="text-[11px] text-slate-500">Miesiąc bazowy</span>
+                <Input
+                  type="month"
+                  value={accountBalanceMonth}
+                  onChange={(event) => setAccountBalanceMonth(event.target.value)}
+                  className="h-9 w-full min-w-[220px] pr-10 text-sm"
+                  disabled={isSavingAccountBalance}
+                />
+              </label>
+              <label className="grid min-w-0 gap-1">
+                <span className="text-[11px] text-slate-500">Kwota</span>
+                <NumericInput
+                  value={accountBalanceValue}
+                  onValueChange={setAccountBalanceValue}
+                  className="h-9 w-full min-w-[180px] text-sm"
+                  disabled={isSavingAccountBalance}
+                />
+              </label>
+              <Button className="h-9 w-full self-end px-3 2xl:w-auto" disabled={isSavingAccountBalance} onClick={() => void saveAccountBalanceAnchor()}>
+                {isSavingAccountBalance ? "Zapisywanie..." : "Zapisz stan konta"}
+              </Button>
+              <Button
+                variant="ghost"
+                className="h-9 w-full self-end border bg-white px-3 2xl:w-auto"
+                disabled={isSavingAccountBalance || !hasAccountBalanceAnchor}
+                onClick={() => void saveAccountBalanceAnchor(true)}
+              >
+                Wyczyść
+              </Button>
+            </div>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>
+              Aktywny anchor: {hasAccountBalanceAnchor ? `${formatMonthKeyLabel(accountBalanceMonth)} · ${money.format(accountBalanceValue)}` : "brak"}
+            </span>
+            {accountBalanceStatus && <span>{accountBalanceStatus}</span>}
+          </div>
+        </div>
+
         <div className="space-y-2 lg:hidden">
           <div className="rounded-sm border border-slate-300 bg-white p-3">
             <p className="text-xs font-semibold text-slate-700">
@@ -638,7 +776,7 @@ export default function CashflowPage() {
                 <p className="font-semibold text-rose-700">{money.format(effectiveMonthlyTotals.reduce((sum, v) => sum + v.expenses, 0))}</p>
               </div>
               <div className="rounded-sm border border-slate-200 bg-slate-50 px-2 py-1">
-                <p className="text-slate-500">Saldo (rok)</p>
+                <p className="text-slate-500">Zysk (rok)</p>
                 <p className="font-semibold">{money.format(effectiveMonthlyTotals.reduce((sum, v) => sum + v.balance, 0))}</p>
               </div>
               <div className="rounded-sm border border-slate-200 bg-slate-50 px-2 py-1">
@@ -668,7 +806,7 @@ export default function CashflowPage() {
                   <div className="mb-2 flex items-center justify-between">
                     <h3 className="text-sm font-semibold">{month.label}</h3>
                     <span className={`text-xs font-bold ${((monthly?.balance ?? 0) >= 0) ? "text-emerald-700" : "text-rose-700"}`}>
-                      Saldo: {money.format(monthly?.balance ?? 0)}
+                      Zysk: {money.format(monthly?.balance ?? 0)}
                     </span>
                   </div>
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
@@ -822,7 +960,7 @@ export default function CashflowPage() {
               <SummaryRow label="Prognoza przychodów (auto)" values={forecastIncomeTotals} textClass="text-blue-700" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
               <SummaryRow label="Miesięczne wydatki" values={effectiveMonthlyTotals.map((v) => v.expenses)} textClass="text-rose-700" currentMonthKey={currentMonthKey} monthKeys={months.map((m) => m.key)} />
               <SummaryRow
-                label="Miesięczne saldo"
+                label="Zysk"
                 values={effectiveMonthlyTotals.map((v) => v.balance)}
                 emphasis
                 currentMonthKey={currentMonthKey}
@@ -1049,7 +1187,7 @@ export default function CashflowPage() {
             Wydatki: <strong>{money.format(currentMonthCitInfo.expenses)}</strong>
           </p>
           <p className="mt-1">
-            Saldo miesiąca: <strong>{money.format(currentMonthCitInfo.balance)}</strong>
+            Zysk miesiąca: <strong>{money.format(currentMonthCitInfo.balance)}</strong>
           </p>
           <p className="mt-1">
             Podstawa CIT narastająco w roku = max(0, wynik YTD): <strong>{money.format(currentMonthCitInfo.taxableBase)}</strong>

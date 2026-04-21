@@ -85,3 +85,37 @@ model FitsseyClient {
   @@index([userId, clientUuid])
   @@index([userId, normalizedName])
 }
+
+model FitsseySale {
+  id            String   @id @default(cuid())
+  userId        String
+  saleDate      DateTime
+  saleDayKey    String
+  saleMonthKey  String
+  itemName      String
+  amount        Float
+  userGuid      String?
+  clientUuid    String?
+  userFullName  String
+  userEmail     String?
+  userPhone     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId, saleDate])
+  @@index([userId, saleDayKey])
+  @@index([userId, saleMonthKey])
+  @@index([userId, userGuid])
+  @@index([userId, clientUuid])
+}
+
+model CashflowSettings {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  accountBalance     Float?
+  accountBalanceMonth String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([userId])
+}
