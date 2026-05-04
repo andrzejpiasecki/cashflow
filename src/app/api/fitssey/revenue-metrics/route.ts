@@ -53,6 +53,19 @@ function getComparableBounds() {
   };
 }
 
+function getRemainingPeriodBounds(currentDay: number, offset: number) {
+  const now = getNowInTimeZone(BUSINESS_TIME_ZONE);
+  const date = new Date(now.year, now.month - 1 - offset, 1);
+  const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+  const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  if (currentDay > lastDay) return null;
+
+  return {
+    startKey: `${monthKey}-${String(currentDay).padStart(2, "0")}`,
+    endKey: `${monthKey}-${String(lastDay).padStart(2, "0")}`,
+  };
+}
+
 async function getImportedRevenueTotals(monthKeys: string[]) {
   const importedRows = await db.flowRow.findMany({
     where: { userId: SHARED_SCOPE_ID, type: "income", isImported: true },
@@ -75,13 +88,18 @@ async function getImportedRevenueTotals(monthKeys: string[]) {
 
 async function getComparableRevenueMetrics() {
   const bounds = getComparableBounds();
+  const now = getNowInTimeZone(BUSINESS_TIME_ZONE);
+  const remainingBounds = [1, 2, 3]
+    .map((offset) => getRemainingPeriodBounds(now.day, offset))
+    .filter((period): period is { startKey: string; endKey: string } => period !== null);
+  const earliestSaleDayKey = [bounds.previousStartKey, ...remainingBounds.map((period) => period.startKey)].sort()[0];
   const fitsseySale = getFitsseySaleDelegate();
   const salesRows = fitsseySale
     ? await fitsseySale.findMany({
       where: {
         userId: SHARED_SCOPE_ID,
         saleDayKey: {
-          gte: bounds.previousStartKey,
+          gte: earliestSaleDayKey,
           lte: bounds.currentEndKey,
         },
       },
@@ -97,6 +115,7 @@ async function getComparableRevenueMetrics() {
   let currentPeriodRevenue = 0;
   let previousPeriodRevenue = 0;
   let previousFullMonthRevenue = 0;
+  const previousRemainingRevenue = remainingBounds.map(() => 0);
 
   for (const row of salesRows) {
     if (row.saleDayKey >= bounds.currentStartKey && row.saleDayKey <= bounds.currentEndKey) {
@@ -108,6 +127,11 @@ async function getComparableRevenueMetrics() {
     if (row.saleDayKey >= bounds.previousStartKey && row.saleDayKey <= bounds.previousFullEndKey) {
       previousFullMonthRevenue += row.amount;
     }
+    remainingBounds.forEach((period, index) => {
+      if (row.saleDayKey >= period.startKey && row.saleDayKey <= period.endKey) {
+        previousRemainingRevenue[index] += row.amount;
+      }
+    });
   }
 
   if (salesRows.length === 0) {
@@ -118,11 +142,16 @@ async function getComparableRevenueMetrics() {
   currentPeriodRevenue = Math.round(currentPeriodRevenue);
   previousPeriodRevenue = Math.round(previousPeriodRevenue);
   previousFullMonthRevenue = Math.round(previousFullMonthRevenue);
+  const averageRemainingRevenue = previousRemainingRevenue.length > 0
+    ? previousRemainingRevenue.reduce((sum, value) => sum + value, 0) / previousRemainingRevenue.length
+    : 0;
+  const currentMonthForecastRevenue = Math.round(currentPeriodRevenue + averageRemainingRevenue);
 
   return {
     currentPeriodRevenue,
     previousPeriodRevenue,
     previousFullMonthRevenue,
+    currentMonthForecastRevenue,
     revenueMoMChange: previousPeriodRevenue > 0
       ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100
       : null,

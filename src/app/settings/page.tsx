@@ -27,6 +27,13 @@ async function parseResponsePayload(response: Response) {
   }
 }
 
+function formatBuildTime(value: string | undefined) {
+  if (!value) return "brak danych";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("pl-PL");
+}
+
 export default function SettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -170,6 +177,7 @@ export default function SettingsPage() {
               Ostatni import: {lastImportedAt ? new Date(lastImportedAt).toLocaleString("pl-PL") : "brak"}
             </div>
             <div className="text-xs text-muted-foreground">Status: {lastImportStatus ?? "brak"}</div>
+            <div className="text-xs text-muted-foreground">Build aplikacji: {formatBuildTime(process.env.NEXT_PUBLIC_BUILD_TIME)}</div>
 
             <div className="flex flex-wrap items-center gap-2">
               <Button onClick={save} disabled={isSaving || isRefreshing}>

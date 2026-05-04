@@ -72,22 +72,20 @@ function vatFromGross(amount: number, rate: number) {
 function getForecastMetrics(
   actualByMonth: { key: string; income: number; expenses: number }[],
   currentMonthKey: string,
-  revenueMoMChangePercent: number | null,
+  currentMonthForecastRevenue: number | null,
 ) {
   const previousMonthsIncome = actualByMonth
     .filter((month) => month.key < currentMonthKey)
     .map((month) => month.income)
-    .slice(-2);
-  const previousMonthIncome = previousMonthsIncome.at(-1) ?? 0;
-  const monthOverMonthChange = revenueMoMChangePercent != null ? revenueMoMChangePercent / 100 : 0;
-  const currentMonthForecastContribution = Math.max(0, Math.round(previousMonthIncome * (1 + monthOverMonthChange)));
-  const forecastInputs = previousMonthIncome > 0
-    ? [...previousMonthsIncome, currentMonthForecastContribution]
-    : previousMonthsIncome;
+    .filter((income) => income > 0)
+    .slice(-3);
+  const historicalBaseline = previousMonthsIncome.length === 0
+    ? 0
+    : previousMonthsIncome.reduce((sum, value) => sum + value, 0) / previousMonthsIncome.length;
+  const currentMonthActual = actualByMonth.find((month) => month.key === currentMonthKey)?.income ?? 0;
+  const currentMonthForecastContribution = Math.round(currentMonthForecastRevenue ?? (currentMonthActual > 0 ? currentMonthActual : historicalBaseline));
 
-  const forecastBaseline = forecastInputs.length > 0
-    ? Math.round(forecastInputs.reduce((sum, value) => sum + value, 0) / forecastInputs.length)
-    : 0;
+  const forecastBaseline = Math.round(historicalBaseline || currentMonthActual);
 
   return { forecastBaseline, currentMonthForecastContribution };
 }
@@ -138,7 +136,7 @@ export default function CashflowPage() {
   const [vatInfoPosition, setVatInfoPosition] = useState<InfoPopoverPosition | null>(null);
   const [showCitInfo, setShowCitInfo] = useState(false);
   const [citInfoPosition, setCitInfoPosition] = useState<InfoPopoverPosition | null>(null);
-  const [dashboardRevenueMoMChange, setDashboardRevenueMoMChange] = useState<number | null>(null);
+  const [currentMonthForecastRevenue, setCurrentMonthForecastRevenue] = useState<number | null>(null);
   const [accountBalanceValue, setAccountBalanceValue] = useState(0);
   const [accountBalanceMonth, setAccountBalanceMonth] = useState(monthKeyFromDate(new Date()));
   const [hasAccountBalanceAnchor, setHasAccountBalanceAnchor] = useState(false);
@@ -220,11 +218,11 @@ export default function CashflowPage() {
       try {
         const response = await fetch("/api/fitssey/revenue-metrics");
         if (!response.ok) return;
-        const payload = (await response.json()) as { revenueMoMChange?: number | null };
+        const payload = (await response.json()) as { currentMonthForecastRevenue?: number | null };
         if (!isMounted) return;
-        setDashboardRevenueMoMChange(typeof payload.revenueMoMChange === "number" ? payload.revenueMoMChange : null);
+        setCurrentMonthForecastRevenue(typeof payload.currentMonthForecastRevenue === "number" ? payload.currentMonthForecastRevenue : null);
       } catch {
-        // keep fallback
+        // keep fallback based on monthly values
       }
     };
 
@@ -282,7 +280,7 @@ export default function CashflowPage() {
     const { forecastBaseline, currentMonthForecastContribution } = getForecastMetrics(
       actualByMonth.map((month) => ({ key: month.key, income: month.importedIncomeActual, expenses: month.expenses })),
       currentMonthKey,
-      dashboardRevenueMoMChange,
+      currentMonthForecastRevenue,
     );
 
     return new Map(
@@ -320,7 +318,7 @@ export default function CashflowPage() {
         ];
       }),
     );
-  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, vatRate, dashboardRevenueMoMChange]);
+  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, vatRate, currentMonthForecastRevenue]);
 
   const timelineComputed = useMemo(() => {
     const actualByMonth = timelineMonths.map((key) => {
@@ -340,7 +338,7 @@ export default function CashflowPage() {
     const { forecastBaseline, currentMonthForecastContribution } = getForecastMetrics(
       actualByMonth.map((month) => ({ key: month.key, income: month.importedIncomeActual, expenses: month.expenses })),
       currentMonthKey,
-      dashboardRevenueMoMChange,
+      currentMonthForecastRevenue,
     );
 
     const computed = [];
@@ -396,7 +394,7 @@ export default function CashflowPage() {
     }
 
     return new Map(computed.map((month) => [month.key, month]));
-  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, citRate, vatMonthBreakdown, dashboardRevenueMoMChange, hasAccountBalanceAnchor]);
+  }, [timelineMonths, incomeRows, expenseRows, currentMonthKey, citRate, vatMonthBreakdown, currentMonthForecastRevenue, hasAccountBalanceAnchor]);
 
   const taxInfoMonthKey = useMemo(() => {
     if (vatMonthBreakdown.has(currentMonthKey) || timelineComputed.has(currentMonthKey)) return currentMonthKey;
