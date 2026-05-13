@@ -205,6 +205,87 @@ function buildClientsSummary(records: SalesRecord[], months: string[]) {
   return [...byClient.values()].sort((a, b) => b.totalAmount - a.totalAmount).slice(0, 200);
 }
 
+function buildPromotionCampaigns(records: SalesRecord[]) {
+  const passProducts = [...new Set(records.filter((row) => row.isPass).map((row) => row.product))];
+  const nowTs = Date.now();
+
+  return passProducts
+    .map((productName) => {
+      const campaignPurchases = records.filter((row) => row.product === productName);
+      const firstPurchaseByClient = new Map<string, SalesRecord>();
+      for (const row of campaignPurchases) {
+        const current = firstPurchaseByClient.get(row.clientKey);
+        if (!current || row.date < current.date) firstPurchaseByClient.set(row.clientKey, row);
+      }
+
+      const rows = [...firstPurchaseByClient.values()].map((purchase) => {
+        const followUpPurchases = records
+          .filter((row) => row.clientKey === purchase.clientKey && row.date > purchase.date)
+          .sort((a, b) => a.date.getTime() - b.date.getTime());
+        const nextPurchase = followUpPurchases[0] ?? null;
+        const latestPurchase = records
+          .filter((row) => row.clientKey === purchase.clientKey)
+          .sort((a, b) => b.date.getTime() - a.date.getTime())[0] ?? purchase;
+        const daysSinceCampaignPurchase = Math.max(0, Math.floor((nowTs - purchase.date.getTime()) / 86400000));
+        const daysSinceLastPurchase = Math.max(0, Math.floor((nowTs - latestPurchase.date.getTime()) / 86400000));
+        const hasFollowUp = followUpPurchases.length > 0;
+        const pending = !hasFollowUp && daysSinceCampaignPurchase < 30;
+        const inactiveAfterFollowUp = hasFollowUp && daysSinceLastPurchase > 30;
+        const retained = hasFollowUp && !inactiveAfterFollowUp;
+
+        return {
+          name: purchase.clientName,
+          clientGuid: purchase.clientGuid,
+          purchaseDate: purchase.date.toISOString(),
+          campaignAmount: purchase.amount,
+          retained,
+          pending,
+          inactiveAfterFollowUp,
+          daysSinceCampaignPurchase,
+          lastPurchaseDate: latestPurchase.date.toISOString(),
+          daysSinceLastPurchase,
+          nextPurchaseDate: nextPurchase?.date.toISOString() ?? null,
+          daysToNextPurchase: nextPurchase ? Math.max(0, Math.round((nextPurchase.date.getTime() - purchase.date.getTime()) / 86400000)) : null,
+          nextProduct: nextPurchase?.product ?? null,
+          followUpProducts: [...new Set(followUpPurchases.map((row) => row.product))].slice(0, 4),
+          followUpRevenue: followUpPurchases.reduce((sum, row) => sum + row.amount, 0),
+        };
+      });
+
+      const buyers = rows.length;
+      const retained = rows.filter((row) => row.retained).length;
+      const pending = rows.filter((row) => row.pending).length;
+      const inactiveAfterFollowUp = rows.filter((row) => row.inactiveAfterFollowUp).length;
+      const evaluatedBuyers = buyers - pending;
+      const followUpRevenue = rows.reduce((sum, row) => sum + row.followUpRevenue, 0);
+      const campaignRevenue = campaignPurchases.reduce((sum, row) => sum + row.amount, 0);
+      const nextProductCount = new Map<string, number>();
+      for (const row of rows) {
+        if (row.nextProduct) nextProductCount.set(row.nextProduct, (nextProductCount.get(row.nextProduct) || 0) + 1);
+      }
+
+      return {
+        productName,
+        buyers,
+        purchases: campaignPurchases.length,
+        retained,
+        pending,
+        inactiveAfterFollowUp,
+        evaluatedBuyers,
+        lost: rows.filter((row) => !row.retained && !row.pending && !row.inactiveAfterFollowUp).length,
+        retentionRate: evaluatedBuyers > 0 ? (retained / evaluatedBuyers) * 100 : 0,
+        campaignRevenue,
+        followUpRevenue,
+        topNextProducts: [...nextProductCount.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "pl"))
+          .slice(0, 5)
+          .map(([name, count]) => ({ name, count })),
+        rows: rows.sort((a, b) => b.campaignAmount - a.campaignAmount || a.name.localeCompare(b.name, "pl")),
+      };
+    })
+    .sort((a, b) => b.buyers - a.buyers || b.campaignRevenue - a.campaignRevenue || a.productName.localeCompare(b.productName, "pl"));
+}
+
 function estimatePassCycleDays(passPurchaseDates: Date[]) {
   if (passPurchaseDates.length < 2) return 30;
   const sorted = [...passPurchaseDates].sort((a, b) => a.getTime() - b.getTime());
@@ -533,6 +614,7 @@ function buildAnalytics(
     activeClientsByMonth,
     dailyRevenue: buildDailyRevenueSeries(records),
     contacts,
+    promotionCampaigns: buildPromotionCampaigns(records),
     newClientSales: segmentSales.filter((sale) => sale.isNewForMonth).slice(0, 100),
     returningClientSales: segmentSales.filter((sale) => !sale.isNewForMonth).slice(0, 100),
     clientsSummary: buildClientsSummary(records, months),

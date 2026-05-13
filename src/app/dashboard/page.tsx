@@ -41,8 +41,41 @@ type DashboardPayload = {
     score: number;
     priority: string;
   }[];
+  promotionCampaigns: PromotionCampaign[];
   clientsSummary: { name: string; purchaseCount: number; totalAmount: number; purchasesByMonth: Record<string, number> }[];
   error?: string;
+};
+
+type PromotionCampaign = {
+  productName: string;
+  buyers: number;
+  purchases: number;
+  retained: number;
+  pending: number;
+  inactiveAfterFollowUp: number;
+  evaluatedBuyers: number;
+  lost: number;
+  retentionRate: number;
+  campaignRevenue: number;
+  followUpRevenue: number;
+  topNextProducts: { name: string; count: number }[];
+  rows: {
+    name: string;
+    clientGuid: string | null;
+    purchaseDate: string;
+    campaignAmount: number;
+    retained: boolean;
+    pending: boolean;
+    inactiveAfterFollowUp: boolean;
+    daysSinceCampaignPurchase: number;
+    lastPurchaseDate: string;
+    daysSinceLastPurchase: number;
+    nextPurchaseDate: string | null;
+    daysToNextPurchase: number | null;
+    nextProduct: string | null;
+    followUpProducts: string[];
+    followUpRevenue: number;
+  }[];
 };
 
 const money = new Intl.NumberFormat("pl-PL", { style: "decimal", maximumFractionDigits: 0 });
@@ -60,6 +93,7 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
+  const [selectedPromotionProduct, setSelectedPromotionProduct] = useState("");
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 767px)");
@@ -109,6 +143,11 @@ export default function DashboardPage() {
       previous: Math.round(data.dailyRevenue.previousValues[index] ?? 0),
     }));
   }, [data]);
+
+  const selectedPromotionCampaign = useMemo(() => {
+    if (!data?.promotionCampaigns?.length) return null;
+    return data.promotionCampaigns.find((campaign) => campaign.productName === selectedPromotionProduct) ?? data.promotionCampaigns[0];
+  }, [data, selectedPromotionProduct]);
 
   return (
     <AppShell title="Dashboard">
@@ -239,6 +278,14 @@ export default function DashboardPage() {
 
           </section>
 
+          <PromotionCampaignSection
+            campaigns={data.promotionCampaigns ?? []}
+            selectedCampaign={selectedPromotionCampaign}
+            selectedProduct={selectedPromotionCampaign?.productName ?? ""}
+            studioUuid={data.studioUuid}
+            onSelectProduct={setSelectedPromotionProduct}
+          />
+
           <TableCard title="Klienci do kontaktu">
             <ContactsTable rows={data.contacts} studioUuid={data.studioUuid} />
           </TableCard>
@@ -291,6 +338,113 @@ function TableCard({ title, children }: { title: string; children: React.ReactNo
       <h3 className="mb-2 text-sm font-semibold text-slate-800">{title}</h3>
       {children}
     </div>
+  );
+}
+
+function PromotionCampaignSection({
+  campaigns,
+  selectedCampaign,
+  selectedProduct,
+  studioUuid,
+  onSelectProduct,
+}: {
+  campaigns: PromotionCampaign[];
+  selectedCampaign: PromotionCampaign | null;
+  selectedProduct: string;
+  studioUuid?: string;
+  onSelectProduct: (product: string) => void;
+}) {
+  return (
+    <TableCard title="Analiza promocji / karnetu">
+      {campaigns.length === 0 || !selectedCampaign ? (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-muted-foreground">Brak sprzedanych karnetów w danych.</div>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+            <label className="grid gap-1 text-xs font-semibold text-slate-700">
+              Wybierz karnet/promocję
+              <select
+                value={selectedProduct}
+                onChange={(event) => onSelectProduct(event.target.value)}
+                className="min-h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+              >
+                {campaigns.map((campaign) => (
+                  <option key={campaign.productName} value={campaign.productName}>
+                    {campaign.productName} ({campaign.buyers})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="rounded-xl border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+              <p className="font-bold">Podsumowanie kampanii</p>
+              <p>Retencja: {selectedCampaign.retentionRate.toFixed(1)}% po min. 30 dniach</p>
+            </div>
+          </div>
+
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-7">
+            <SummaryTile label="Kupujący" value={String(selectedCampaign.buyers)} sublabel={`${selectedCampaign.purchases} zakupów`} />
+            <SummaryTile label="Zostali" value={String(selectedCampaign.retained)} sublabel="aktywni w ostatnie 30 dni" valueClass="text-emerald-700" />
+            <SummaryTile label="W trakcie" value={String(selectedCampaign.pending)} sublabel="mniej niż 30 dni" valueClass="text-amber-700" />
+            <SummaryTile label="Nie stali" value={String(selectedCampaign.inactiveAfterFollowUp)} sublabel="kolejny zakup, potem cisza" valueClass="text-orange-700" />
+            <SummaryTile label="Nie zostali" value={String(selectedCampaign.lost)} sublabel="brak zakupu po 30 dniach" valueClass="text-rose-700" />
+            <SummaryTile label="Przychód z karnetu" value={money.format(selectedCampaign.campaignRevenue)} sublabel="wybrana promocja" />
+            <SummaryTile label="Przychód później" value={money.format(selectedCampaign.followUpRevenue)} sublabel="po zakupie promocji" />
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+            <span className="font-bold text-slate-800">Najczęstszy kolejny zakup: </span>
+            {selectedCampaign.topNextProducts.length === 0
+              ? "brak kolejnych zakupów"
+              : selectedCampaign.topNextProducts.map((product) => `${product.name} (${product.count})`).join(", ")}
+          </div>
+
+          <div className="max-w-full overflow-x-auto">
+            <Table className="min-w-[1160px] text-xs">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Klient</TableHead>
+                  <TableHead>Zakup promocji</TableHead>
+                  <TableHead className="text-right">Kwota</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Dni od ost. zakupu</TableHead>
+                  <TableHead>Kolejny zakup</TableHead>
+                  <TableHead className="text-right">Dni do zakupu</TableHead>
+                  <TableHead>Co kupił potem</TableHead>
+                  <TableHead className="text-right">Przychód potem</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {selectedCampaign.rows.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={9} className="text-muted-foreground">Brak klientów dla tej promocji.</TableCell>
+                  </TableRow>
+                ) : (
+                  selectedCampaign.rows.map((row) => (
+                    <TableRow key={`${row.name}-${row.purchaseDate}`} className={getPromotionStatusRowClass(row)}>
+                      <TableCell>
+                        <ClientNameLink name={row.name} studioUuid={studioUuid} clientGuid={row.clientGuid} />
+                      </TableCell>
+                      <TableCell>{new Date(row.purchaseDate).toLocaleDateString("pl-PL")}</TableCell>
+                      <TableCell className="text-right">{money.format(row.campaignAmount)}</TableCell>
+                      <TableCell>
+                        <span className={getPromotionStatusBadgeClass(row)}>
+                          {getPromotionStatusLabel(row)}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-right">{row.daysSinceLastPurchase}</TableCell>
+                      <TableCell>{row.nextProduct ? `${row.nextProduct} (${new Date(row.nextPurchaseDate ?? row.purchaseDate).toLocaleDateString("pl-PL")})` : "-"}</TableCell>
+                      <TableCell className="text-right">{row.daysToNextPurchase ?? "-"}</TableCell>
+                      <TableCell>{row.followUpProducts.length ? row.followUpProducts.join(", ") : "-"}</TableCell>
+                      <TableCell className="text-right">{money.format(row.followUpRevenue)}</TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </div>
+      )}
+    </TableCard>
   );
 }
 
@@ -526,6 +680,27 @@ function ContactValueLink({
       {normalized}
     </a>
   );
+}
+
+function getPromotionStatusLabel(row: { retained: boolean; pending: boolean; inactiveAfterFollowUp: boolean }) {
+  if (row.retained) return "został";
+  if (row.pending) return "w trakcie";
+  if (row.inactiveAfterFollowUp) return "nie stały";
+  return "nie został";
+}
+
+function getPromotionStatusBadgeClass(row: { retained: boolean; pending: boolean; inactiveAfterFollowUp: boolean }) {
+  if (row.retained) return "inline-flex rounded-full bg-emerald-100 px-2 py-0.5 font-semibold text-emerald-700";
+  if (row.pending) return "inline-flex rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-700";
+  if (row.inactiveAfterFollowUp) return "inline-flex rounded-full bg-orange-100 px-2 py-0.5 font-semibold text-orange-700";
+  return "inline-flex rounded-full bg-rose-100 px-2 py-0.5 font-semibold text-rose-700";
+}
+
+function getPromotionStatusRowClass(row: { retained: boolean; pending: boolean; inactiveAfterFollowUp: boolean }) {
+  if (row.retained) return "bg-emerald-50/40";
+  if (row.pending) return "bg-amber-50/40";
+  if (row.inactiveAfterFollowUp) return "bg-orange-50/40";
+  return "bg-rose-50/40";
 }
 
 function formatMonthKey(monthKey: string) {
