@@ -107,6 +107,25 @@ export default function SalesPage() {
   }, []);
 
   useEffect(() => {
+    const reloadAfterAutoImport = () => {
+      const load = async () => {
+        setError("");
+        const response = await fetch("/api/fitssey/dashboard");
+        const payload = (await response.json().catch(() => ({}))) as SalesPayload;
+        if (!response.ok) {
+          setError(payload.error ?? "Nie udało się pobrać leadów sprzedażowych.");
+          return;
+        }
+        setData(payload);
+      };
+      void load();
+    };
+
+    window.addEventListener("fitssey:auto-import-completed", reloadAfterAutoImport);
+    return () => window.removeEventListener("fitssey:auto-import-completed", reloadAfterAutoImport);
+  }, []);
+
+  useEffect(() => {
     const raw = window.localStorage.getItem("sales_lead_stages_v1");
     if (!raw) return;
     try {

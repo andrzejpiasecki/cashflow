@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { MessageCircle, PartyPopper } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, LabelList, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { AppShell } from "@/components/app-shell";
@@ -8,6 +9,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 
 type DashboardPayload = {
   studioUuid?: string;
+  welcomeSmsMessage?: string;
+  smsTemplates?: SmsTemplate[];
   months: string[];
   latestMonth: string | null;
   latestMrr: number;
@@ -26,6 +29,14 @@ type DashboardPayload = {
   productCount: Record<string, number>;
   activeClientsByMonth: Record<string, number>;
   dailyRevenue: { labels: string[]; values: number[]; previousValues: number[] };
+  recentPurchases: {
+    date: string;
+    clientName: string;
+    clientGuid: string | null;
+    phone: string | null;
+    product: string;
+    amount: number;
+  }[];
   contacts: {
     name: string;
     clientGuid: string | null;
@@ -44,6 +55,12 @@ type DashboardPayload = {
   promotionCampaigns: PromotionCampaign[];
   clientsSummary: { name: string; purchaseCount: number; totalAmount: number; purchasesByMonth: Record<string, number> }[];
   error?: string;
+};
+
+type SmsTemplate = {
+  id: string;
+  label: string;
+  message: string;
 };
 
 type PromotionCampaign = {
@@ -120,6 +137,25 @@ export default function DashboardPage() {
       }
     };
     void load();
+  }, []);
+
+  useEffect(() => {
+    const reloadAfterAutoImport = () => {
+      const load = async () => {
+        setError("");
+        const response = await fetch("/api/fitssey/dashboard");
+        const payload = (await response.json().catch(() => ({}))) as DashboardPayload;
+        if (!response.ok) {
+          setError(payload.error ?? "Nie udało się pobrać dashboardu Fitssey.");
+          return;
+        }
+        setData(payload);
+      };
+      void load();
+    };
+
+    window.addEventListener("fitssey:auto-import-completed", reloadAfterAutoImport);
+    return () => window.removeEventListener("fitssey:auto-import-completed", reloadAfterAutoImport);
   }, []);
 
   const monthlyChartData = useMemo(() => {
@@ -275,6 +311,10 @@ export default function DashboardPage() {
                 </ResponsiveContainer>
               </ChartWrap>
             </ChartCard>
+
+            <TableCard title="Ostatnie 20 zakupów">
+              <RecentPurchasesTable rows={data.recentPurchases ?? []} studioUuid={data.studioUuid} smsTemplates={data.smsTemplates} welcomeSmsMessage={data.welcomeSmsMessage} />
+            </TableCard>
 
           </section>
 
@@ -445,6 +485,85 @@ function PromotionCampaignSection({
         </div>
       )}
     </TableCard>
+  );
+}
+
+function RecentPurchasesTable({
+  rows,
+  studioUuid,
+  smsTemplates,
+  welcomeSmsMessage,
+}: {
+  rows: {
+    date: string;
+    clientName: string;
+    clientGuid: string | null;
+    phone: string | null;
+    product: string;
+    amount: number;
+  }[];
+  studioUuid?: string;
+  smsTemplates?: SmsTemplate[];
+  welcomeSmsMessage?: string;
+}) {
+  const templates = smsTemplates?.length
+    ? smsTemplates
+    : [{ id: "welcome", label: "Powitalny", message: welcomeSmsMessage ?? "" }];
+  const [selectedTemplateId, setSelectedTemplateId] = useState(templates[0]?.id ?? "welcome");
+  const selectedTemplate = templates.find((template) => template.id === selectedTemplateId) ?? templates[0];
+
+  return (
+    <div className="space-y-3">
+      <label className="grid max-w-sm gap-1 text-xs font-semibold text-slate-700">
+        Typ SMS-a z szablonu
+        <select
+          value={selectedTemplate?.id ?? ""}
+          onChange={(event) => setSelectedTemplateId(event.target.value)}
+          className="min-h-9 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+        >
+          {templates.map((template) => (
+            <option key={template.id} value={template.id}>{template.label}</option>
+          ))}
+        </select>
+      </label>
+
+      <div className="max-w-full overflow-x-auto">
+      <Table className="min-w-[780px] text-xs">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Klient</TableHead>
+            <TableHead>Co kupił</TableHead>
+            <TableHead>Data</TableHead>
+            <TableHead className="text-right">Kwota</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.length === 0 ? (
+            <TableRow>
+              <TableCell colSpan={4} className="text-muted-foreground">
+                Brak zakupów.
+              </TableCell>
+            </TableRow>
+          ) : (
+            rows.map((row) => (
+              <TableRow key={`${row.clientName}-${row.date}-${row.product}`}>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <ClientNameLink name={row.clientName} studioUuid={studioUuid} clientGuid={row.clientGuid} />
+                    <SmsLink phone={row.phone} clientName={row.clientName} />
+                    <TemplateSmsLink phone={row.phone} clientName={row.clientName} template={selectedTemplate} />
+                  </div>
+                </TableCell>
+                <TableCell>{row.product}</TableCell>
+                <TableCell>{new Date(row.date).toLocaleDateString("pl-PL")}</TableCell>
+                <TableCell className="text-right">{money.format(row.amount)}</TableCell>
+              </TableRow>
+            ))
+          )}
+        </TableBody>
+      </Table>
+      </div>
+    </div>
   );
 }
 
@@ -680,6 +799,77 @@ function ContactValueLink({
       {normalized}
     </a>
   );
+}
+
+function SmsLink({ phone, clientName }: { phone: string | null | undefined; clientName: string }) {
+  const normalized = String(phone ?? "").replace(/[^\d+]/g, "");
+  if (!normalized) {
+    return (
+      <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-300" title="Brak telefonu">
+        <MessageCircle className="h-3.5 w-3.5" />
+      </span>
+    );
+  }
+  const href = buildSmsHref(normalized);
+
+  return (
+    <a
+      href={href}
+      onClick={(event) => openSmsHref(event, href)}
+      className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100"
+      aria-label={`Wyślij SMS do ${clientName}`}
+      title={`Wyślij SMS do ${clientName}`}
+    >
+      <MessageCircle className="h-3.5 w-3.5" />
+    </a>
+  );
+}
+
+function TemplateSmsLink({ phone, clientName, template }: { phone: string | null | undefined; clientName: string; template?: SmsTemplate }) {
+  const normalized = String(phone ?? "").replace(/[^\d+]/g, "");
+  const firstName = clientName.trim().split(/\s+/)[0] || "";
+  const fallbackMessage = `Cześć${firstName ? ` ${firstName}` : ""}, tu Reforma Pilates. Dziękujemy za zakup i witamy w studiu! Jeśli masz pytania albo chcesz dobrać termin zajęć, odpisz na tę wiadomość.`;
+  const message = template?.message?.trim()
+    ? template.message.replaceAll("{imie}", firstName).replaceAll("{imię}", firstName)
+    : fallbackMessage;
+  const label = template?.label ?? "SMS z szablonu";
+
+  if (!normalized) {
+    return (
+      <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-300" title="Brak telefonu">
+        <PartyPopper className="h-3.5 w-3.5" />
+      </span>
+    );
+  }
+  const href = buildSmsHref(normalized, message);
+
+  return (
+    <a
+      href={href}
+      onClick={(event) => openSmsHref(event, href)}
+      className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+      aria-label={`Wyślij ${label} do ${clientName}`}
+      title={`${label} do ${clientName}`}
+    >
+      <PartyPopper className="h-3.5 w-3.5" />
+    </a>
+  );
+}
+
+function buildSmsHref(phone: string, body?: string) {
+  if (!body) return `sms:${phone}`;
+  const separator = isAppleSmsDevice() ? "&" : "?";
+  return `sms:${phone}${separator}body=${encodeURIComponent(body)}`;
+}
+
+function isAppleSmsDevice() {
+  if (typeof navigator === "undefined") return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent);
+}
+
+function openSmsHref(event: React.MouseEvent<HTMLAnchorElement>, href: string) {
+  event.preventDefault();
+  window.location.href = href;
 }
 
 function getPromotionStatusLabel(row: { retained: boolean; pending: boolean; inactiveAfterFollowUp: boolean }) {

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { UserButton, useAuth } from "@clerk/nextjs";
@@ -10,9 +11,42 @@ type AppShellProps = {
   children: React.ReactNode;
 };
 
+const AUTO_IMPORT_CLIENT_CHECK_KEY = "fitssey_auto_import_last_checked_at";
+const AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const AUTO_IMPORT_PATHS = new Set(["/cashflow", "/dashboard", "/sales"]);
+
 export function AppShell({ title, subtitle, children }: AppShellProps) {
   const pathname = usePathname();
   const { isLoaded, isSignedIn } = useAuth();
+
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn || !AUTO_IMPORT_PATHS.has(pathname)) return;
+
+    const now = Date.now();
+    const lastCheckedAt = Number(window.localStorage.getItem(AUTO_IMPORT_CLIENT_CHECK_KEY) ?? 0);
+    if (Number.isFinite(lastCheckedAt) && now - lastCheckedAt < AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS) return;
+    window.localStorage.setItem(AUTO_IMPORT_CLIENT_CHECK_KEY, String(now));
+
+    let cancelled = false;
+    void fetch("/api/fitssey/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto: true }),
+    })
+      .then(async (response) => {
+        const payload = (await response.json().catch(() => ({}))) as { skipped?: boolean };
+        if (!cancelled && response.ok && !payload.skipped) {
+          window.dispatchEvent(new CustomEvent("fitssey:auto-import-completed"));
+        }
+      })
+      .catch(() => {
+        // Auto-refresh is opportunistic; pages still render cached data if Fitssey is unavailable.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isLoaded, isSignedIn, pathname]);
 
   if (!isLoaded) {
     return <main className="p-6 text-sm text-muted-foreground">Ładowanie...</main>;

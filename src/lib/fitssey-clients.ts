@@ -10,10 +10,16 @@ type FitsseyClientApiRow = {
   fullName?: string;
   firstName?: string;
   lastName?: string;
+  phone?: string;
+  mobilePhone?: string;
+  phoneNumber?: string;
+  contactPhone?: string;
   emailAddress?: string;
   contactEmailAddress?: string;
   client?: {
     uuid?: string;
+    phoneNumber?: string;
+    mobilePhone?: string;
     phone?: {
       mobilePhone?: string;
       homePhone?: string;
@@ -55,6 +61,37 @@ function normalizeEmail(value: unknown) {
 function normalizePhone(value: unknown) {
   const cleaned = safeText(value).replace(/[^\d+]/g, "");
   return cleaned.length >= 6 ? cleaned : null;
+}
+
+function findPhoneValue(value: unknown): string | null {
+  const direct = normalizePhone(value);
+  if (direct) return direct;
+  if (!value || typeof value !== "object") return null;
+
+  const objectValue = value as Record<string, unknown>;
+  const phoneKeys = [
+    "mobilePhone",
+    "phoneNumber",
+    "phone",
+    "contactPhone",
+    "userPhone",
+    "homePhone",
+    "workPhone",
+  ];
+  for (const key of phoneKeys) {
+    const parsed = normalizePhone(objectValue[key]);
+    if (parsed) return parsed;
+  }
+
+  const nestedKeys = ["client", "user", "contact", "profile", "details", "phone"];
+  for (const key of nestedKeys) {
+    const nested = objectValue[key];
+    if (nested === value) continue;
+    const parsed = findPhoneValue(nested);
+    if (parsed) return parsed;
+  }
+
+  return null;
 }
 
 function parseClientRows(payload: unknown) {
@@ -133,7 +170,7 @@ function mapClientRow(row: FitsseyClientApiRow): NormalizedFitsseyClient | null 
   const fullName = safeText(row.fullName) || safeText(`${safeText(row.firstName)} ${safeText(row.lastName)}`) || "Nieznany klient";
   const normalizedName = normalizeName(fullName);
   const email = normalizeEmail(row.contactEmailAddress ?? row.emailAddress);
-  const phone = normalizePhone(row.client?.phone?.mobilePhone ?? row.client?.phone?.homePhone ?? row.client?.phone?.workPhone);
+  const phone = findPhoneValue(row);
   const clientUuid = safeText(row.client?.uuid) || null;
 
   return {

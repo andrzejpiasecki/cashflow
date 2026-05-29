@@ -26,6 +26,18 @@ type FitsseySalesRow = {
   userPhone?: string;
   phone?: string;
   phoneNumber?: string;
+  mobilePhone?: string;
+  contactPhone?: string;
+  user?: {
+    phone?: string;
+    phoneNumber?: string;
+    mobilePhone?: string;
+  };
+  client?: {
+    phone?: string;
+    phoneNumber?: string;
+    mobilePhone?: string;
+  };
   vatRate?: number | string;
   itemVatRate?: number | string;
   taxRate?: number | string;
@@ -37,6 +49,8 @@ type FitsseySalesRow = {
 const FITSSEY_BASE_URL_TEMPLATE = "https://app.fitssey.com/{uuid}/api/v4/public";
 const PAGE_SIZE = 200;
 const DEFAULT_START_DATE = "2025-10-01";
+const DEFAULT_AUTO_IMPORT_INTERVAL_MINS = 180;
+const RUNNING_IMPORT_LOCK_MINS = 10;
 
 function hasFitsseySettingsDelegate() {
   return "fitsseySettings" in (db as unknown as Record<string, unknown>);
@@ -52,6 +66,42 @@ async function updateImportStatus(status: string, importedAt?: Date) {
     where: { userId: SHARED_SCOPE_ID },
     data: importedAt ? { lastImportedAt: importedAt, lastImportStatus: status } : { lastImportStatus: status },
   });
+}
+
+async function getImportSettings() {
+  if (!hasFitsseySettingsDelegate()) return null;
+  return (await db.fitsseySettings.findUnique({ where: { userId: SHARED_SCOPE_ID } }))
+    ?? (await db.fitsseySettings.findFirst({ orderBy: { updatedAt: "desc" } }));
+}
+
+function minutesSince(date: Date, now: Date) {
+  return (now.getTime() - date.getTime()) / 60000;
+}
+
+async function shouldRunAutoImport(now: Date) {
+  const settings = await getImportSettings();
+  if (!settings) {
+    return { run: false, reason: "missing_settings" };
+  }
+  if (!settings.autoImportEnabled) {
+    return { run: false, reason: "auto_disabled" };
+  }
+
+  const runningRecently = settings.lastImportStatus?.startsWith("running:") && minutesSince(settings.updatedAt, now) < RUNNING_IMPORT_LOCK_MINS;
+  if (runningRecently) {
+    return { run: false, reason: "already_running" };
+  }
+
+  const intervalMins = Math.max(15, settings.autoImportIntervalMins || DEFAULT_AUTO_IMPORT_INTERVAL_MINS);
+  if (settings.lastImportedAt && minutesSince(settings.lastImportedAt, now) < intervalMins) {
+    return {
+      run: false,
+      reason: "too_soon",
+      nextAllowedAt: new Date(settings.lastImportedAt.getTime() + intervalMins * 60000).toISOString(),
+    };
+  }
+
+  return { run: true, reason: "due" };
 }
 
 function getMonthKeyFromRawSaleDate(rawDate: unknown) {
@@ -97,6 +147,37 @@ function normalizePhone(value: unknown) {
   return cleaned.length >= 6 ? cleaned : null;
 }
 
+function findPhoneValue(value: unknown): string | null {
+  const direct = normalizePhone(value);
+  if (direct) return direct;
+  if (!value || typeof value !== "object") return null;
+
+  const objectValue = value as Record<string, unknown>;
+  const phoneKeys = [
+    "userPhone",
+    "phone",
+    "phoneNumber",
+    "mobilePhone",
+    "contactPhone",
+    "homePhone",
+    "workPhone",
+  ];
+  for (const key of phoneKeys) {
+    const parsed = normalizePhone(objectValue[key]);
+    if (parsed) return parsed;
+  }
+
+  const nestedKeys = ["user", "client", "contact", "profile", "details", "phone"];
+  for (const key of nestedKeys) {
+    const nested = objectValue[key];
+    if (nested === value) continue;
+    const parsed = findPhoneValue(nested);
+    if (parsed) return parsed;
+  }
+
+  return null;
+}
+
 function mapSalesRowsForCache(rows: FitsseySalesRow[]) {
   return rows.flatMap((row) => {
     const saleDate = new Date(row.saleDate ?? "");
@@ -123,7 +204,7 @@ function mapSalesRowsForCache(rows: FitsseySalesRow[]) {
       clientUuid: safeText(row.clientUuid) || null,
       userFullName: safeText(row.userFullName) || "Nieznany klient",
       userEmail: normalizeEmail(row.userEmail ?? row.email),
-      userPhone: normalizePhone(row.userPhone ?? row.phone ?? row.phoneNumber),
+      userPhone: findPhoneValue(row),
     }];
   });
 }
@@ -311,15 +392,22 @@ export async function POST(request: Request) {
     const body = (await request.json().catch(() => ({}))) as { auto?: boolean };
     const isAutoImport = body.auto === true;
 
+    const now = new Date();
     if (isAutoImport) {
-      return NextResponse.json({
-        skipped: true,
-        reason: "manual_only",
-      });
+      const autoDecision = await shouldRunAutoImport(now);
+      if (!autoDecision.run) {
+        return NextResponse.json({
+          skipped: true,
+          reason: autoDecision.reason,
+          nextAllowedAt: "nextAllowedAt" in autoDecision ? autoDecision.nextAllowedAt : undefined,
+        });
+      }
+      await updateImportStatus("running: auto import");
+    } else {
+      await updateImportStatus("running: manual import");
     }
 
     const config = await resolveAuthConfig();
-    const now = new Date();
     const startDate = config.startDate || DEFAULT_START_DATE;
     const endDate = now.toISOString().slice(0, 10);
     const rows = await fetchSalesRows(config, startDate, endDate);

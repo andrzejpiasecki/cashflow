@@ -63,10 +63,44 @@ const money = new Intl.NumberFormat("pl-PL", {
 });
 const EXPENSE_VAT_RATE = 23;
 const DEFAULT_FITSSEY_VAT_RATE = 8;
+const CIT_LOSS_CARRYFORWARD_YEARS = 5;
+const CIT_ONE_TIME_LOSS_DEDUCTION_LIMIT = 5_000_000;
+
+type CitLossCarryforward = {
+  year: number;
+  originalAmount: number;
+  remainingAmount: number;
+};
+
+type CitLossAllocation = {
+  year: number;
+  amount: number;
+};
 
 function vatFromGross(amount: number, rate: number) {
   if (!Number.isFinite(amount) || !Number.isFinite(rate) || amount === 0 || rate <= 0) return 0;
   return amount * (rate / (100 + rate));
+}
+
+function calculateCitLossDeduction(losses: CitLossCarryforward[], taxYear: number, profitYtd: number) {
+  let remainingBase = Math.max(profitYtd, 0);
+  const allocations: CitLossAllocation[] = [];
+
+  for (const loss of losses) {
+    if (remainingBase <= 0) break;
+    if (taxYear <= loss.year || taxYear - loss.year > CIT_LOSS_CARRYFORWARD_YEARS || loss.remainingAmount <= 0) continue;
+
+    const yearlyLimit = Math.min(loss.remainingAmount, CIT_ONE_TIME_LOSS_DEDUCTION_LIMIT);
+    const amount = Math.min(remainingBase, yearlyLimit);
+    if (amount <= 0) continue;
+    allocations.push({ year: loss.year, amount });
+    remainingBase -= amount;
+  }
+
+  return {
+    total: allocations.reduce((sum, allocation) => sum + allocation.amount, 0),
+    allocations,
+  };
 }
 
 function getForecastMetrics(
@@ -231,8 +265,15 @@ export default function CashflowPage() {
     void loadRevenueMetrics();
     void loadRows(true);
 
+    const reloadAfterAutoImport = () => {
+      void loadRevenueMetrics();
+      void loadRows(false);
+    };
+    window.addEventListener("fitssey:auto-import-completed", reloadAfterAutoImport);
+
     return () => {
       isMounted = false;
+      window.removeEventListener("fitssey:auto-import-completed", reloadAfterAutoImport);
     };
   }, [isLoaded, isSignedIn]);
 
@@ -347,7 +388,24 @@ export default function CashflowPage() {
     let previousSettlementIndex = -1;
     const yearProfitYtd = new Map<number, number>();
     const yearCitPaidYtd = new Map<number, number>();
+    const yearLossDeductionAllocations = new Map<number, CitLossAllocation[]>();
+    const citLosses: CitLossCarryforward[] = [];
+    let processingYear: number | null = null;
     const vatAccrual = actualByMonth.map((month) => vatMonthBreakdown.get(month.key)?.netVat ?? 0);
+
+    const closeTaxYear = (year: number) => {
+      const allocations = yearLossDeductionAllocations.get(year) ?? [];
+      for (const allocation of allocations) {
+        const loss = citLosses.find((item) => item.year === allocation.year);
+        if (loss) loss.remainingAmount = Math.max(0, loss.remainingAmount - allocation.amount);
+      }
+
+      const annualProfit = yearProfitYtd.get(year) ?? 0;
+      if (annualProfit < 0) {
+        const amount = Math.abs(annualProfit);
+        citLosses.push({ year, originalAmount: amount, remainingAmount: amount });
+      }
+    };
 
     for (let index = 0; index < actualByMonth.length; index += 1) {
       const month = actualByMonth[index];
@@ -362,10 +420,20 @@ export default function CashflowPage() {
       const balance = effectiveIncome - month.expenses;
       const taxableBalance = taxableIncome - month.expenses;
       const year = Number(month.key.slice(0, 4));
+      if (processingYear === null) {
+        processingYear = year;
+      } else if (processingYear !== year) {
+        closeTaxYear(processingYear);
+        processingYear = year;
+      }
       const prevProfitYtd = yearProfitYtd.get(year) ?? 0;
       const nextProfitYtd = prevProfitYtd + taxableBalance;
       yearProfitYtd.set(year, nextProfitYtd);
-      const citBaseYtd = Math.max(nextProfitYtd, 0);
+      const citBaseBeforeLossYtd = Math.max(nextProfitYtd, 0);
+      const lossDeduction = calculateCitLossDeduction(citLosses, year, citBaseBeforeLossYtd);
+      yearLossDeductionAllocations.set(year, lossDeduction.allocations);
+      const citLossDeductionYtd = lossDeduction.total;
+      const citBaseYtd = Math.max(citBaseBeforeLossYtd - citLossDeductionYtd, 0);
       const citDueYtd = citBaseYtd * (citRate / 100);
       const paidYtd = yearCitPaidYtd.get(year) ?? 0;
       const cit = Math.max(citDueYtd - paidYtd, 0);
@@ -384,7 +452,10 @@ export default function CashflowPage() {
         forecastIncome: forecastImportedIncome,
         expenses: month.expenses,
         balance,
+        taxableBalance,
         cit,
+        citBaseBeforeLossYtd,
+        citLossDeductionYtd,
         citBaseYtd,
         citDueYtd,
         vatPayment,
@@ -476,7 +547,9 @@ export default function CashflowPage() {
       key: taxInfoMonthKey,
       income: monthData?.taxableIncome ?? 0,
       expenses: monthData?.expenses ?? 0,
-      balance: monthData?.balance ?? 0,
+      balance: monthData?.taxableBalance ?? 0,
+      taxableBaseBeforeLoss: monthData?.citBaseBeforeLossYtd ?? 0,
+      lossDeduction: monthData?.citLossDeductionYtd ?? 0,
       taxableBase: monthData?.citBaseYtd ?? 0,
       citDueYtd: monthData?.citDueYtd ?? 0,
       cit: monthData?.cit ?? 0,
@@ -822,7 +895,7 @@ export default function CashflowPage() {
                         onClick={(event) => {
                           const rect = event.currentTarget.getBoundingClientRect();
                           const panelWidth = Math.min(340, window.innerWidth - 24);
-                          const estimatedPanelHeight = 220;
+                          const estimatedPanelHeight = 280;
                           const desiredLeft = rect.left - 18;
                           const maxLeft = Math.max(12, window.innerWidth - panelWidth - 12);
                           const canOpenAbove = rect.top - 12 >= estimatedPanelHeight;
@@ -975,7 +1048,7 @@ export default function CashflowPage() {
                       onClick={(event) => {
                         const rect = event.currentTarget.getBoundingClientRect();
                         const panelWidth = Math.min(340, window.innerWidth - 24);
-                        const estimatedPanelHeight = 220;
+                        const estimatedPanelHeight = 280;
                         const desiredLeft = rect.left - 18;
                         const maxLeft = Math.max(12, window.innerWidth - panelWidth - 12);
                         const canOpenAbove = rect.top - 12 >= estimatedPanelHeight;
@@ -1185,10 +1258,19 @@ export default function CashflowPage() {
             Wydatki: <strong>{money.format(currentMonthCitInfo.expenses)}</strong>
           </p>
           <p className="mt-1">
-            Zysk miesiąca: <strong>{money.format(currentMonthCitInfo.balance)}</strong>
+            Wynik podatkowy miesiąca: <strong>{money.format(currentMonthCitInfo.balance)}</strong>
           </p>
           <p className="mt-1">
-            Podstawa CIT narastająco w roku = max(0, wynik YTD): <strong>{money.format(currentMonthCitInfo.taxableBase)}</strong>
+            Wynik podatkowy YTD przed stratami: <strong>{money.format(currentMonthCitInfo.taxableBaseBeforeLoss)}</strong>
+          </p>
+          <p className="mt-1">
+            Odliczenie strat z poprzednich lat: <strong>{money.format(currentMonthCitInfo.lossDeduction)}</strong>
+          </p>
+          <p className="mt-1 text-slate-500">
+            Straty z poprzednich lat są odliczane dopiero od dodatniego dochodu, do 5 lat wstecz i maksymalnie do 5 mln zł jednorazowo.
+          </p>
+          <p className="mt-1">
+            Podstawa CIT narastająco = max(0, wynik YTD - odliczone straty): <strong>{money.format(currentMonthCitInfo.taxableBase)}</strong>
           </p>
           <p className="mt-1">
             Podatek należny narastająco: <strong>{money.format(currentMonthCitInfo.citDueYtd)}</strong>

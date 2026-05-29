@@ -21,6 +21,45 @@ type SalesRecord = {
 };
 
 const BUSINESS_TIME_ZONE = "Europe/Warsaw";
+const DEFAULT_WELCOME_SMS_MESSAGE = "Cześć {imie}, tu Reforma Pilates. Dziękujemy za zakup i witamy w studiu! Jeśli masz pytania albo chcesz dobrać termin zajęć, odpisz na tę wiadomość.";
+
+type SmsTemplate = {
+  id: string;
+  label: string;
+  message: string;
+};
+
+const DEFAULT_SMS_TEMPLATES: SmsTemplate[] = [
+  { id: "welcome", label: "Powitalny", message: DEFAULT_WELCOME_SMS_MESSAGE },
+  {
+    id: "first_visit",
+    label: "Pierwsza wizyta",
+    message: "Dzień dobry {imie}! Przypominamy, że jeśli to Twoje pierwsze zajęcia na reformerze, najlepiej wybrać grupę Reformer Start. Do zobaczenia w Studio Re•forma.",
+  },
+  {
+    id: "renewal",
+    label: "Odnowienie karnetu",
+    message: "Cześć {imie}, tu Reforma Pilates. Twój karnet dobiega końca lub jest już po terminie. Jeśli chcesz kontynuować zajęcia, odpisz na tę wiadomość, a pomożemy dobrać termin.",
+  },
+];
+
+function normalizeSmsTemplates(value: unknown, welcomeSmsMessage: string): SmsTemplate[] {
+  if (!Array.isArray(value)) {
+    return DEFAULT_SMS_TEMPLATES.map((template) => template.id === "welcome" ? { ...template, message: welcomeSmsMessage } : template);
+  }
+
+  const templates = value.flatMap((item): SmsTemplate[] => {
+    if (!item || typeof item !== "object") return [];
+    const objectItem = item as Record<string, unknown>;
+    const id = String(objectItem.id ?? "").trim();
+    const label = String(objectItem.label ?? "").trim();
+    const message = String(objectItem.message ?? "").trim();
+    if (!id || !label || !message) return [];
+    return [{ id, label, message }];
+  });
+
+  return templates.length > 0 ? templates : DEFAULT_SMS_TEMPLATES;
+}
 
 function getFitsseySettingsDelegate() {
   return (db as unknown as { fitsseySettings?: typeof db.fitsseySettings }).fitsseySettings;
@@ -203,6 +242,48 @@ function buildClientsSummary(records: SalesRecord[], months: string[]) {
     byClient.set(row.clientKey, existing);
   }
   return [...byClient.values()].sort((a, b) => b.totalAmount - a.totalAmount).slice(0, 200);
+}
+
+function buildRecentPurchases(
+  records: SalesRecord[],
+  cachedClients: {
+    externalGuid: string;
+    clientUuid: string | null;
+    normalizedName: string;
+    phone: string | null;
+  }[],
+) {
+  const clientsByGuid = new Map<string, { phone: string | null }>();
+  const clientsByUuid = new Map<string, { phone: string | null }>();
+  const clientsByName = new Map<string, { phone: string | null }>();
+  for (const row of cachedClients) {
+    const contact = { phone: row.phone };
+    const guidKey = safeText(row.externalGuid).toLowerCase();
+    const uuidKey = safeText(row.clientUuid).toLowerCase();
+    const nameKey = normalizeName(row.normalizedName);
+    if (guidKey) clientsByGuid.set(guidKey, contact);
+    if (uuidKey) clientsByUuid.set(uuidKey, contact);
+    if (nameKey) clientsByName.set(nameKey, contact);
+  }
+
+  return [...records]
+    .sort((a, b) => b.date.getTime() - a.date.getTime())
+    .slice(0, 20)
+    .map((row) => {
+      const cachedContact = (row.clientGuid && clientsByGuid.get(row.clientGuid.toLowerCase()))
+        || (row.clientUuid && clientsByUuid.get(row.clientUuid.toLowerCase()))
+        || clientsByName.get(normalizeName(row.clientName))
+        || null;
+
+      return {
+        date: row.date.toISOString(),
+        clientName: row.clientName,
+        clientGuid: row.clientGuid,
+        phone: row.clientPhone ?? cachedContact?.phone ?? null,
+        product: row.product,
+        amount: row.amount,
+      };
+    });
 }
 
 function buildPromotionCampaigns(records: SalesRecord[]) {
@@ -614,6 +695,7 @@ function buildAnalytics(
     activeClientsByMonth,
     dailyRevenue: buildDailyRevenueSeries(records),
     contacts,
+    recentPurchases: buildRecentPurchases(records, cachedClients),
     promotionCampaigns: buildPromotionCampaigns(records),
     newClientSales: segmentSales.filter((sale) => sale.isNewForMonth).slice(0, 100),
     returningClientSales: segmentSales.filter((sale) => !sale.isNewForMonth).slice(0, 100),
@@ -641,6 +723,8 @@ export async function GET() {
     return NextResponse.json({
       ...analytics,
       studioUuid,
+      welcomeSmsMessage: settings?.welcomeSmsMessage || DEFAULT_WELCOME_SMS_MESSAGE,
+      smsTemplates: normalizeSmsTemplates(settings?.smsTemplates, settings?.welcomeSmsMessage || DEFAULT_WELCOME_SMS_MESSAGE),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Dashboard fetch failed.";
