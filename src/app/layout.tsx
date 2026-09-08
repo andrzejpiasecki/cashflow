@@ -43,8 +43,8 @@ export default function RootLayout({
         <ClerkProvider
           signInUrl="/sign-in"
           signUpUrl="/sign-up"
-          signInFallbackRedirectUrl="/cashflow"
-          signUpFallbackRedirectUrl="/cashflow"
+          signInFallbackRedirectUrl="/dashboard"
+          signUpFallbackRedirectUrl="/dashboard"
           afterSignOutUrl="/sign-in"
         >
           <PwaRegister />

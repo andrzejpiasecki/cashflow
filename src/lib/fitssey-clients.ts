@@ -187,6 +187,10 @@ function getFitsseyClientDelegate() {
   return (db as unknown as { fitsseyClient?: typeof db.fitsseyClient }).fitsseyClient;
 }
 
+function getFitsseyClientContactDelegate() {
+  return (db as unknown as { fitsseyClientContact?: typeof db.fitsseyClientContact }).fitsseyClientContact;
+}
+
 export async function fetchFitsseyClients(studioUuid: string, apiKey: string): Promise<NormalizedFitsseyClient[]> {
   const baseUrl = FITSSEY_BASE_URL_TEMPLATE.replace("{uuid}", encodeURIComponent(studioUuid.trim()));
   const headers: HeadersInit = { Accept: "application/json", Authorization: `Bearer ${apiKey.trim()}` };
@@ -225,11 +229,13 @@ export async function fetchFitsseyClients(studioUuid: string, apiKey: string): P
 
 export async function syncFitsseyClientsCache(studioUuid: string, apiKey: string) {
   const fitsseyClient = getFitsseyClientDelegate();
-  if (!fitsseyClient) return { fetched: 0, upserted: 0 };
+  const fitsseyClientContact = getFitsseyClientContactDelegate();
+  if (!fitsseyClient) return { fetched: 0, upserted: 0, contactsUpserted: 0 };
 
   const normalizedRows = await fetchFitsseyClients(studioUuid, apiKey);
   const fetched = normalizedRows.length;
   let upserted = 0;
+  let contactsUpserted = 0;
 
   try {
     for (const client of normalizedRows) {
@@ -254,20 +260,64 @@ export async function syncFitsseyClientsCache(studioUuid: string, apiKey: string
           fullName: client.fullName,
           normalizedName: client.normalizedName,
           email: client.email,
-          phone: client.phone,
         },
       });
+      if (client.phone) {
+        await fitsseyClient.updateMany({
+          where: { userId: SHARED_SCOPE_ID, externalGuid: client.externalGuid, phone: null },
+          data: { phone: client.phone },
+        });
+      }
       upserted += 1;
+
+      if (fitsseyClientContact) {
+        const clientKey = client.externalGuid.toLowerCase();
+        const updateData: {
+          clientGuid: string;
+          clientUuid: string | null;
+          fullName: string;
+          normalizedName: string;
+          email?: string;
+        } = {
+          clientGuid: client.externalGuid,
+          clientUuid: client.clientUuid,
+          fullName: client.fullName,
+          normalizedName: client.normalizedName,
+        };
+        if (client.email) updateData.email = client.email;
+
+        await fitsseyClientContact.upsert({
+          where: { userId_clientKey: { userId: SHARED_SCOPE_ID, clientKey } },
+          create: {
+            userId: SHARED_SCOPE_ID,
+            clientKey,
+            clientGuid: client.externalGuid,
+            clientUuid: client.clientUuid,
+            fullName: client.fullName,
+            normalizedName: client.normalizedName,
+            email: client.email,
+            phone: client.phone,
+          },
+          update: updateData,
+        });
+        if (client.phone) {
+          await fitsseyClientContact.updateMany({
+            where: { userId: SHARED_SCOPE_ID, clientKey, phone: null },
+            data: { phone: client.phone },
+          });
+        }
+        contactsUpserted += 1;
+      }
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes("does not exist")) {
-      return { fetched, upserted: 0 };
+      return { fetched, upserted: 0, contactsUpserted };
     }
     throw error;
   }
 
-  return { fetched, upserted };
+  return { fetched, upserted, contactsUpserted };
 }
 
 async function fetchEntriesByEndpoint(baseUrl: string, headers: HeadersInit, endpointPath: string) {

@@ -88,6 +88,25 @@ model FitsseyClient {
   @@index([userId, normalizedName])
 }
 
+model FitsseyClientContact {
+  id             String   @id @default(cuid())
+  userId         String
+  clientKey      String
+  clientGuid     String?
+  clientUuid     String?
+  fullName       String
+  normalizedName String
+  email          String?
+  phone          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([userId, clientKey])
+  @@index([userId, clientGuid])
+  @@index([userId, clientUuid])
+  @@index([userId, normalizedName])
+}
+
 model FitsseySale {
   id            String   @id @default(cuid())
   userId        String
@@ -101,6 +120,9 @@ model FitsseySale {
   userFullName  String
   userEmail     String?
   userPhone     String?
+  passActivatedDayKey String?
+  passExpiresDayKey   String?
+  passInstanceGuid    String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 

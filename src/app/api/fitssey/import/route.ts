@@ -46,6 +46,32 @@ type FitsseySalesRow = {
   itemTax?: number | string;
 };
 
+type FitsseyClientPricingOptionRow = {
+  activatedAt?: string;
+  clientUuid?: string;
+  expiresAt?: string;
+  guid?: string;
+  qualifiedName?: string;
+  userGuid?: string;
+};
+
+type MappedFitsseySale = {
+  userId: string;
+  saleDate: Date;
+  saleDayKey: string;
+  saleMonthKey: string;
+  itemName: string;
+  amount: number;
+  userGuid: string | null;
+  clientUuid: string | null;
+  userFullName: string;
+  userEmail: string | null;
+  userPhone: string | null;
+  passActivatedDayKey: string | null;
+  passExpiresDayKey: string | null;
+  passInstanceGuid: string | null;
+};
+
 const FITSSEY_BASE_URL_TEMPLATE = "https://app.fitssey.com/{uuid}/api/v4/public";
 const PAGE_SIZE = 200;
 const DEFAULT_START_DATE = "2025-10-01";
@@ -58,6 +84,10 @@ function hasFitsseySettingsDelegate() {
 
 function hasFitsseySaleDelegate() {
   return "fitsseySale" in (db as unknown as Record<string, unknown>);
+}
+
+function getFitsseyClientContactDelegate() {
+  return (db as unknown as { fitsseyClientContact?: typeof db.fitsseyClientContact }).fitsseyClientContact;
 }
 
 async function updateImportStatus(status: string, importedAt?: Date) {
@@ -178,7 +208,18 @@ function findPhoneValue(value: unknown): string | null {
   return null;
 }
 
-function mapSalesRowsForCache(rows: FitsseySalesRow[]) {
+function normalizeName(value: unknown) {
+  return safeText(value).replace(/\s+/g, " ").toLowerCase();
+}
+
+function getSaleClientKey(row: MappedFitsseySale) {
+  return row.userGuid?.toLowerCase()
+    || row.clientUuid?.toLowerCase()
+    || (row.userEmail ? `email:${row.userEmail.toLowerCase()}` : null)
+    || `name:${normalizeName(row.userFullName)}`;
+}
+
+function mapSalesRowsForCache(rows: FitsseySalesRow[]): MappedFitsseySale[] {
   return rows.flatMap((row) => {
     const saleDate = new Date(row.saleDate ?? "");
     if (Number.isNaN(saleDate.getTime())) return [];
@@ -205,13 +246,86 @@ function mapSalesRowsForCache(rows: FitsseySalesRow[]) {
       userFullName: safeText(row.userFullName) || "Nieznany klient",
       userEmail: normalizeEmail(row.userEmail ?? row.email),
       userPhone: findPhoneValue(row),
+      passActivatedDayKey: null,
+      passExpiresDayKey: null,
+      passInstanceGuid: null,
     }];
   });
 }
 
-async function replaceFitsseySalesCache(rows: FitsseySalesRow[]) {
-  if (!hasFitsseySaleDelegate()) return;
-  const mapped = mapSalesRowsForCache(rows);
+function attachPassValidity(sales: MappedFitsseySale[], pricingOptions: FitsseyClientPricingOptionRow[]) {
+  type PassInstance = {
+    guid: string;
+    userGuid: string;
+    clientUuid: string;
+    productKey: string;
+    activatedDayKey: string;
+    expiresDayKey: string | null;
+  };
+
+  const instances = new Map<string, PassInstance>();
+  for (const pricingOption of pricingOptions) {
+    const guid = safeText(pricingOption.guid);
+    const userGuid = safeText(pricingOption.userGuid).toLowerCase();
+    const clientUuid = safeText(pricingOption.clientUuid).toLowerCase();
+    const productKey = normalizeName(pricingOption.qualifiedName);
+    const activatedDayKey = getDayKeyFromRawSaleDate(pricingOption.activatedAt);
+    if (!guid || (!userGuid && !clientUuid) || !productKey || !activatedDayKey) continue;
+
+    const expiresDayKey = getDayKeyFromRawSaleDate(pricingOption.expiresAt);
+    const existing = instances.get(guid);
+    instances.set(guid, {
+      guid,
+      userGuid: userGuid || existing?.userGuid || "",
+      clientUuid: clientUuid || existing?.clientUuid || "",
+      productKey,
+      activatedDayKey: existing && existing.activatedDayKey < activatedDayKey ? existing.activatedDayKey : activatedDayKey,
+      expiresDayKey: !existing?.expiresDayKey || (expiresDayKey && expiresDayKey > existing.expiresDayKey)
+        ? expiresDayKey
+        : existing.expiresDayKey,
+    });
+  }
+
+  const salesByPass = new Map<string, MappedFitsseySale[]>();
+  for (const sale of sales) {
+    const identity = sale.userGuid?.toLowerCase() || sale.clientUuid?.toLowerCase();
+    if (!identity) continue;
+    const key = `${identity}\u0000${normalizeName(sale.itemName)}`;
+    const grouped = salesByPass.get(key) ?? [];
+    grouped.push(sale);
+    salesByPass.set(key, grouped);
+  }
+
+  const instancesByPass = new Map<string, PassInstance[]>();
+  for (const instance of instances.values()) {
+    for (const identity of new Set([instance.userGuid, instance.clientUuid])) {
+      if (!identity) continue;
+      const key = `${identity}\u0000${instance.productKey}`;
+      const grouped = instancesByPass.get(key) ?? [];
+      grouped.push(instance);
+      instancesByPass.set(key, grouped);
+    }
+  }
+
+  for (const [key, groupedSales] of salesByPass) {
+    const groupedInstances = instancesByPass.get(key);
+    if (!groupedInstances) continue;
+    groupedSales.sort((a, b) => a.saleDate.getTime() - b.saleDate.getTime());
+    groupedInstances.sort((a, b) => a.activatedDayKey.localeCompare(b.activatedDayKey));
+    for (let index = 0; index < Math.min(groupedSales.length, groupedInstances.length); index += 1) {
+      const sale = groupedSales[index];
+      const instance = groupedInstances[index];
+      sale.passActivatedDayKey = instance.activatedDayKey;
+      sale.passExpiresDayKey = instance.expiresDayKey;
+      sale.passInstanceGuid = instance.guid;
+    }
+  }
+
+  return sales;
+}
+
+async function replaceFitsseySalesCache(mapped: MappedFitsseySale[]) {
+  if (!hasFitsseySaleDelegate()) return [];
 
   await db.$transaction(async (tx) => {
     await tx.fitsseySale.deleteMany({
@@ -227,6 +341,63 @@ async function replaceFitsseySalesCache(rows: FitsseySalesRow[]) {
       });
     }
   });
+
+  return mapped;
+}
+
+async function upsertClientContactsFromSales(rows: MappedFitsseySale[]) {
+  const fitsseyClientContact = getFitsseyClientContactDelegate();
+  if (!fitsseyClientContact) return 0;
+
+  const contacts = new Map<string, MappedFitsseySale>();
+  for (const row of rows) {
+    const key = getSaleClientKey(row);
+    const existing = contacts.get(key);
+    if (!existing || (!existing.userPhone && row.userPhone) || row.saleDate > existing.saleDate) {
+      contacts.set(key, row);
+    }
+  }
+
+  let upserted = 0;
+  for (const [clientKey, row] of contacts.entries()) {
+    const updateData: {
+      clientGuid: string | null;
+      clientUuid: string | null;
+      fullName: string;
+      normalizedName: string;
+      email: string | null;
+    } = {
+      clientGuid: row.userGuid,
+      clientUuid: row.clientUuid,
+      fullName: row.userFullName,
+      normalizedName: normalizeName(row.userFullName),
+      email: row.userEmail,
+    };
+
+    await fitsseyClientContact.upsert({
+      where: { userId_clientKey: { userId: SHARED_SCOPE_ID, clientKey } },
+      create: {
+        userId: SHARED_SCOPE_ID,
+        clientKey,
+        clientGuid: row.userGuid,
+        clientUuid: row.clientUuid,
+        fullName: row.userFullName,
+        normalizedName: normalizeName(row.userFullName),
+        email: row.userEmail,
+        phone: row.userPhone,
+      },
+      update: updateData,
+    });
+    if (row.userPhone) {
+      await fitsseyClientContact.updateMany({
+        where: { userId: SHARED_SCOPE_ID, clientKey, phone: null },
+        data: { phone: row.userPhone },
+      });
+    }
+    upserted += 1;
+  }
+
+  return upserted;
 }
 
 async function resolveAuthConfig(): Promise<FitsseyAuthConfig> {
@@ -306,6 +477,45 @@ async function fetchSalesRows(config: FitsseyAuthConfig, startDate: string, endD
     }
   }
 
+  return rows;
+}
+
+async function fetchClientPricingOptions(config: FitsseyAuthConfig, sales: MappedFitsseySale[]) {
+  const baseUrl = FITSSEY_BASE_URL_TEMPLATE.replace("{uuid}", encodeURIComponent(config.studioUuid));
+  const headers = buildHeaders(config);
+  const clients = new Map<string, { userGuid: string; clientUuid: string | null }>();
+  for (const sale of sales) {
+    if (normalizeName(sale.itemName) !== "karnet bez limitu" || !sale.userGuid) continue;
+    clients.set(sale.userGuid.toLowerCase(), { userGuid: sale.userGuid, clientUuid: sale.clientUuid });
+  }
+
+  const rows: FitsseyClientPricingOptionRow[] = [];
+  for (const client of clients.values()) {
+    const url = `${baseUrl}/client/${encodeURIComponent(client.userGuid)}/client-pricing-option/all?page=1&count=1000`;
+    let response: Response | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      response = await fetch(url, { method: "GET", headers, cache: "no-store" });
+      if (response.status !== 429) break;
+      const retryAfterSeconds = Math.max(1, Number(response.headers.get("retry-after")) || 30);
+      await new Promise((resolve) => setTimeout(resolve, (retryAfterSeconds + 1) * 1000));
+    }
+    if (!response) continue;
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Fitssey client pricing options API ${response.status}: ${body.slice(0, 140)}`);
+    }
+    const payload = await response.json() as { collection?: FitsseyClientPricingOptionRow[] };
+    if (Array.isArray(payload.collection)) {
+      rows.push(...payload.collection.map((row) => ({
+        ...row,
+        userGuid: client.userGuid,
+        clientUuid: client.clientUuid ?? undefined,
+      })));
+    }
+
+    // Fitssey allows 10 requests per second; leave margin for other API calls.
+    await new Promise((resolve) => setTimeout(resolve, 175));
+  }
   return rows;
 }
 
@@ -411,7 +621,13 @@ export async function POST(request: Request) {
     const startDate = config.startDate || DEFAULT_START_DATE;
     const endDate = now.toISOString().slice(0, 10);
     const rows = await fetchSalesRows(config, startDate, endDate);
-    await replaceFitsseySalesCache(rows);
+    const mappedSales = mapSalesRowsForCache(rows);
+    const clientPricingOptions = await fetchClientPricingOptions(config, mappedSales);
+    const mappedRows = await replaceFitsseySalesCache(
+      attachPassValidity(mappedSales, clientPricingOptions),
+    );
+    const passValidityMatched = mappedRows.filter((row) => row.passExpiresDayKey !== null).length;
+    const contactsUpserted = await upsertClientContactsFromSales(mappedRows);
     const aggregated = aggregateRevenueByProductAndMonth(rows);
 
     if (aggregated.size === 0) {
@@ -520,9 +736,9 @@ export async function POST(request: Request) {
       deletedDuplicates += deleted.count;
     }
 
-    await updateImportStatus(`ok: products=${aggregated.size}, created=${created}, updated=${updated}, removed=${deletedDuplicates}`, new Date());
+    await updateImportStatus(`ok: products=${aggregated.size}, created=${created}, updated=${updated}, removed=${deletedDuplicates}, contacts=${contactsUpserted}, passValidity=${passValidityMatched}`, new Date());
 
-    return NextResponse.json({ created, updated, products: aggregated.size, removed: deletedDuplicates, skipped: false });
+    return NextResponse.json({ created, updated, products: aggregated.size, removed: deletedDuplicates, contacts: contactsUpserted, passValidity: passValidityMatched, skipped: false });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Import failed.";
     await updateImportStatus(`error: ${message}`);

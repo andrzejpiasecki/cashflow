@@ -13,6 +13,7 @@ type SettingsPayload = {
   startDate: string;
   citRate: number;
   vatRate: number;
+  autoImportIntervalMins: number;
   welcomeSmsMessage: string;
   smsTemplates: SmsTemplate[];
   lastImportedAt: string | null;
@@ -70,6 +71,7 @@ export default function SettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isSyncingContacts, setIsSyncingContacts] = useState(false);
   const [status, setStatus] = useState("");
   const [activeTab, setActiveTab] = useState<SettingsTab>("fitssey");
 
@@ -78,6 +80,7 @@ export default function SettingsPage() {
   const [startDate, setStartDate] = useState("");
   const [citRate, setCitRate] = useState(19);
   const [vatRate, setVatRate] = useState(23);
+  const [autoImportIntervalMins, setAutoImportIntervalMins] = useState(180);
   const [smsTemplates, setSmsTemplates] = useState<SmsTemplate[]>(DEFAULT_SMS_TEMPLATES);
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [apiKeyPreview, setApiKeyPreview] = useState<string | null>(null);
@@ -99,6 +102,7 @@ export default function SettingsPage() {
       setStartDate(data.startDate ?? "");
       setCitRate(Number(data.citRate ?? 19));
       setVatRate(Number(data.vatRate ?? 23));
+      setAutoImportIntervalMins(Number(data.autoImportIntervalMins ?? 180));
       setSmsTemplates(data.smsTemplates?.length ? data.smsTemplates : [{ ...DEFAULT_SMS_TEMPLATES[0], message: data.welcomeSmsMessage || DEFAULT_WELCOME_SMS_MESSAGE }, ...DEFAULT_SMS_TEMPLATES.slice(1)]);
       setApiKeyConfigured(Boolean(data.apiKeyConfigured));
       setApiKeyPreview(data.apiKeyPreview ?? null);
@@ -126,6 +130,7 @@ export default function SettingsPage() {
           startDate,
           citRate,
           vatRate,
+          autoImportIntervalMins,
           welcomeSmsMessage: smsTemplates.find((template) => template.id === "welcome")?.message ?? DEFAULT_WELCOME_SMS_MESSAGE,
           smsTemplates,
         }),
@@ -140,6 +145,7 @@ export default function SettingsPage() {
       setApiKeyPreview(payload.apiKeyPreview ?? null);
       setLastImportedAt(payload.lastImportedAt ?? null);
       setLastImportStatus(payload.lastImportStatus ?? null);
+      setAutoImportIntervalMins(Number(payload.autoImportIntervalMins ?? autoImportIntervalMins));
       setSmsTemplates(payload.smsTemplates?.length ? payload.smsTemplates : smsTemplates);
       setStatus("Ustawienia zapisane.");
     } finally {
@@ -165,6 +171,25 @@ export default function SettingsPage() {
       setStatus("Dane Fitssey zostały odświeżone.");
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const syncFitsseyContacts = async () => {
+    setIsSyncingContacts(true);
+    setStatus("");
+    try {
+      const response = await fetch("/api/fitssey/client-contacts/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string; fetched?: number; contactsUpserted?: number };
+      if (!response.ok) {
+        setStatus(payload.error ?? "Nie udało się zsynchronizować kontaktów Fitssey.");
+        return;
+      }
+      setStatus(`Kontakty zsynchronizowane: ${payload.contactsUpserted ?? 0}/${payload.fetched ?? 0}.`);
+    } finally {
+      setIsSyncingContacts(false);
     }
   };
 
@@ -281,14 +306,30 @@ export default function SettingsPage() {
                 <div>Ostatni import: {lastImportedAt ? new Date(lastImportedAt).toLocaleString("pl-PL") : "brak"}</div>
                 <div>Status: {lastImportStatus ?? "brak"}</div>
                 <div>Build aplikacji: {formatBuildTime(process.env.NEXT_PUBLIC_BUILD_TIME)}</div>
-                <Button onClick={refreshFitsseyData} disabled={isSaving || isRefreshing} variant="ghost" className="mt-2 h-9 w-fit border bg-white px-3">
+                <label className="mt-2 grid max-w-xs gap-1 text-sm text-slate-700">
+                  <span className="text-xs text-muted-foreground">Auto-odświeżanie Fitssey co ile minut</span>
+                  <Input
+                    type="number"
+                    value={autoImportIntervalMins}
+                    onChange={(event) => setAutoImportIntervalMins(Number(event.target.value) || 180)}
+                    min={15}
+                    max={1440}
+                  />
+                  <span className="text-xs text-muted-foreground">Minimum 15 min. Aplikacja sprawdza częściej, ale Fitssey jest wołany dopiero po tym interwale.</span>
+                </label>
+                <div className="mt-2 flex flex-wrap gap-2">
+                <Button onClick={refreshFitsseyData} disabled={isSaving || isRefreshing || isSyncingContacts} variant="ghost" className="h-9 w-fit border bg-white px-3">
                   {isRefreshing ? "Odświeżanie..." : "Odśwież dane Fitssey"}
                 </Button>
+                <Button onClick={syncFitsseyContacts} disabled={isSaving || isRefreshing || isSyncingContacts} variant="ghost" className="h-9 w-fit border bg-white px-3">
+                  {isSyncingContacts ? "Synchronizacja..." : "Synchronizuj telefony klientów"}
+                </Button>
+                </div>
               </section>
             )}
 
             <div className="flex flex-wrap items-center gap-2 border-t border-slate-200 pt-3">
-              <Button onClick={save} disabled={isSaving || isRefreshing}>
+              <Button onClick={save} disabled={isSaving || isRefreshing || isSyncingContacts}>
                 {isSaving ? "Zapisywanie..." : "Zapisz ustawienia"}
               </Button>
               {status && <span className="text-xs text-muted-foreground">{status}</span>}

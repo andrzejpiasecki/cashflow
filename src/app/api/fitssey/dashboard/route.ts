@@ -18,6 +18,8 @@ type SalesRecord = {
   product: string;
   amount: number;
   isPass: boolean;
+  passActivatedDayKey: string | null;
+  passExpiresDayKey: string | null;
 };
 
 const BUSINESS_TIME_ZONE = "Europe/Warsaw";
@@ -69,6 +71,10 @@ function getFitsseySaleDelegate() {
   return (db as unknown as { fitsseySale?: typeof db.fitsseySale }).fitsseySale;
 }
 
+function getFitsseyClientContactDelegate() {
+  return (db as unknown as { fitsseyClientContact?: typeof db.fitsseyClientContact }).fitsseyClientContact;
+}
+
 function createMonthlyObject(months: string[], initialValue: number) {
   return Object.fromEntries(months.map((month) => [month, initialValue]));
 }
@@ -106,13 +112,16 @@ function getNowInTimeZone(timeZone: string) {
   return { year, month, day };
 }
 
-async function getImportedRevenueSnapshot() {
+async function getCashflowSnapshot() {
   const rows = await db.flowRow.findMany({
-    where: { userId: SHARED_SCOPE_ID, type: "income", isImported: true },
-    select: { name: true, monthValues: true },
+    where: { userId: SHARED_SCOPE_ID },
+    select: { type: true, name: true, isImported: true, monthValues: true },
   });
 
   const revenueByMonth = new Map<string, number>();
+  const fitsseyRevenueByMonth = new Map<string, number>();
+  const manualRevenueByMonth = new Map<string, number>();
+  const expensesByMonth = new Map<string, number>();
   const mrrByMonth = new Map<string, number>();
 
   for (const row of rows) {
@@ -121,14 +130,23 @@ async function getImportedRevenueSnapshot() {
     for (const [month, rawValue] of Object.entries(monthValues ?? {})) {
       const value = typeof rawValue === "number" ? rawValue : Number(rawValue) || 0;
       if (!Number.isFinite(value) || value === 0) continue;
+      if (row.type === "expense") {
+        expensesByMonth.set(month, (expensesByMonth.get(month) || 0) + value);
+        continue;
+      }
       revenueByMonth.set(month, (revenueByMonth.get(month) || 0) + value);
-      if (isPassRow) {
+      if (row.isImported) {
+        fitsseyRevenueByMonth.set(month, (fitsseyRevenueByMonth.get(month) || 0) + value);
+      } else {
+        manualRevenueByMonth.set(month, (manualRevenueByMonth.get(month) || 0) + value);
+      }
+      if (row.isImported && isPassRow) {
         mrrByMonth.set(month, (mrrByMonth.get(month) || 0) + value);
       }
     }
   }
 
-  return { revenueByMonth, mrrByMonth };
+  return { revenueByMonth, fitsseyRevenueByMonth, manualRevenueByMonth, expensesByMonth, mrrByMonth };
 }
 
 async function getCachedSalesRecords(): Promise<SalesRecord[]> {
@@ -165,8 +183,32 @@ async function getCachedSalesRecords(): Promise<SalesRecord[]> {
       product: row.itemName,
       amount: row.amount,
       isPass: isPassProduct(row.itemName),
+      passActivatedDayKey: row.passActivatedDayKey,
+      passExpiresDayKey: row.passExpiresDayKey,
     };
   });
+}
+
+async function getCachedClientContacts() {
+  const fitsseyClientContact = getFitsseyClientContactDelegate();
+  if (!fitsseyClientContact) return [];
+  try {
+    return await fitsseyClientContact.findMany({
+      where: { userId: SHARED_SCOPE_ID },
+      select: {
+        clientKey: true,
+        clientGuid: true,
+        clientUuid: true,
+        normalizedName: true,
+        email: true,
+        phone: true,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("does not exist")) return [];
+    throw error;
+  }
 }
 
 function buildDailyRevenueSeries(records: SalesRecord[]) {
@@ -215,7 +257,6 @@ function buildComparableMonthToDateRevenue(records: SalesRecord[]) {
   const currentPeriodRevenue = sumByDayRange(currentStartKey, currentEndKey);
   const previousPeriodRevenue = sumByDayRange(prevStartKey, prevComparableEndKey);
   const previousFullMonthRevenue = sumByDayRange(prevStartKey, prevFullEndKey);
-  const revenueMoMChange = previousPeriodRevenue > 0 ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100 : null;
 
   return {
     currentMonthKey,
@@ -223,7 +264,95 @@ function buildComparableMonthToDateRevenue(records: SalesRecord[]) {
     currentPeriodRevenue,
     previousPeriodRevenue,
     previousFullMonthRevenue,
-    revenueMoMChange,
+    revenueMoMChange: previousPeriodRevenue > 0 ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100 : null,
+  };
+}
+
+function buildFinancialMetrics(revenueByMonth: Record<string, number>, expensesByMonth: Record<string, number>) {
+  const now = getNowInTimeZone(BUSINESS_TIME_ZONE);
+  const currentMonthKey = `${now.year}-${String(now.month).padStart(2, "0")}`;
+  const previousMonthDate = new Date(now.year, now.month - 2, 1);
+  const previousMonthKey = `${previousMonthDate.getFullYear()}-${String(previousMonthDate.getMonth() + 1).padStart(2, "0")}`;
+  const netByMonth = Object.fromEntries(
+    Object.keys(revenueByMonth).map((month) => [month, (revenueByMonth[month] || 0) - (expensesByMonth[month] || 0)]),
+  );
+  const currentMonthRevenue = revenueByMonth[currentMonthKey] || 0;
+  const previousMonthRevenue = revenueByMonth[previousMonthKey] || 0;
+
+  return {
+    totalRevenue: Object.values(revenueByMonth).reduce((sum, value) => sum + value, 0),
+    totalExpenses: Object.values(expensesByMonth).reduce((sum, value) => sum + value, 0),
+    totalNet: Object.values(netByMonth).reduce((sum, value) => sum + value, 0),
+    currentMonthRevenue,
+    currentMonthExpenses: expensesByMonth[currentMonthKey] || 0,
+    currentMonthNet: netByMonth[currentMonthKey] || 0,
+    previousMonthRevenue,
+    previousMonthExpenses: expensesByMonth[previousMonthKey] || 0,
+    previousMonthNet: netByMonth[previousMonthKey] || 0,
+    currentPeriodRevenue: currentMonthRevenue,
+    previousPeriodRevenue: previousMonthRevenue,
+    previousFullMonthRevenue: previousMonthRevenue,
+    revenueMoMChange: previousMonthRevenue > 0 ? ((currentMonthRevenue - previousMonthRevenue) / previousMonthRevenue) * 100 : null,
+    expensesByMonth,
+    netByMonth,
+  };
+}
+
+function buildFilteredChartAnalytics(
+  records: SalesRecord[],
+  filteredRecords: SalesRecord[],
+  months: string[],
+  cashflowSnapshot: {
+    manualRevenueByMonth: Map<string, number>;
+    expensesByMonth: Map<string, number>;
+  },
+) {
+  const revenueByMonth = Object.fromEntries(months.map((month) => [month, cashflowSnapshot.manualRevenueByMonth.get(month) || 0]));
+  const expensesByMonth = Object.fromEntries(months.map((month) => [month, cashflowSnapshot.expensesByMonth.get(month) || 0]));
+  const passesSoldByMonth = createMonthlyObject(months, 0);
+  const newClientsByMonth = createMonthlyObject(months, 0);
+  const returningClientsByMonth = createMonthlyObject(months, 0);
+  const uniqueClientsByMonth: Record<string, Set<string>> = Object.fromEntries(months.map((month) => [month, new Set<string>()]));
+  const clientFirstMonth: Record<string, string> = {};
+
+  for (const row of records) {
+    if (!clientFirstMonth[row.clientKey]) clientFirstMonth[row.clientKey] = row.month;
+  }
+
+  for (const row of filteredRecords) {
+    revenueByMonth[row.month] += row.amount;
+    if (row.isPass) passesSoldByMonth[row.month] += 1;
+    uniqueClientsByMonth[row.month].add(row.clientKey);
+  }
+
+  for (const month of months) {
+    for (const client of uniqueClientsByMonth[month]) {
+      if (clientFirstMonth[client] === month) newClientsByMonth[month] += 1;
+      else returningClientsByMonth[month] += 1;
+    }
+  }
+
+  const comparable = buildComparableMonthToDateRevenue(filteredRecords);
+  const currentFitsseyRevenue = comparable.currentPeriodRevenue;
+  const currentManualRevenue = cashflowSnapshot.manualRevenueByMonth.get(comparable.currentMonthKey) || 0;
+  const previousManualRevenue = cashflowSnapshot.manualRevenueByMonth.get(comparable.previousMonthKey) || 0;
+  const currentPeriodRevenue = currentFitsseyRevenue + currentManualRevenue;
+  const previousPeriodRevenue = comparable.previousPeriodRevenue + previousManualRevenue;
+  const previousFullMonthRevenue = comparable.previousFullMonthRevenue + previousManualRevenue;
+
+  return {
+    ...buildFinancialMetrics(revenueByMonth, expensesByMonth),
+    currentFitsseyRevenue,
+    currentManualRevenue,
+    currentPeriodRevenue,
+    previousPeriodRevenue,
+    previousFullMonthRevenue,
+    revenueMoMChange: previousPeriodRevenue > 0 ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100 : null,
+    revenueByMonth,
+    passesSoldByMonth,
+    newClientsByMonth,
+    returningClientsByMonth,
+    dailyRevenue: buildDailyRevenueSeries(filteredRecords),
   };
 }
 
@@ -246,6 +375,14 @@ function buildClientsSummary(records: SalesRecord[], months: string[]) {
 
 function buildRecentPurchases(
   records: SalesRecord[],
+  cachedClientContacts: {
+    clientKey: string;
+    clientGuid: string | null;
+    clientUuid: string | null;
+    normalizedName: string;
+    email: string | null;
+    phone: string | null;
+  }[],
   cachedClients: {
     externalGuid: string;
     clientUuid: string | null;
@@ -253,6 +390,27 @@ function buildRecentPurchases(
     phone: string | null;
   }[],
 ) {
+  const firstPurchaseByClient = new Map<string, Date>();
+  for (const row of records) {
+    const firstPurchaseDate = firstPurchaseByClient.get(row.clientKey);
+    if (!firstPurchaseDate || row.date < firstPurchaseDate) firstPurchaseByClient.set(row.clientKey, row.date);
+  }
+
+  const contactCacheByKey = new Map<string, { phone: string | null }>();
+  const contactCacheByGuid = new Map<string, { phone: string | null }>();
+  const contactCacheByUuid = new Map<string, { phone: string | null }>();
+  const contactCacheByName = new Map<string, { phone: string | null }>();
+  for (const row of cachedClientContacts) {
+    const contact = { phone: row.phone };
+    if (row.clientKey) contactCacheByKey.set(row.clientKey, contact);
+    const guidKey = safeText(row.clientGuid).toLowerCase();
+    const uuidKey = safeText(row.clientUuid).toLowerCase();
+    const nameKey = normalizeName(row.normalizedName);
+    if (guidKey) contactCacheByGuid.set(guidKey, contact);
+    if (uuidKey) contactCacheByUuid.set(uuidKey, contact);
+    if (nameKey) contactCacheByName.set(nameKey, contact);
+  }
+
   const clientsByGuid = new Map<string, { phone: string | null }>();
   const clientsByUuid = new Map<string, { phone: string | null }>();
   const clientsByName = new Map<string, { phone: string | null }>();
@@ -270,6 +428,11 @@ function buildRecentPurchases(
     .sort((a, b) => b.date.getTime() - a.date.getTime())
     .slice(0, 20)
     .map((row) => {
+      const dbContact = contactCacheByKey.get(row.clientKey)
+        || (row.clientGuid && contactCacheByGuid.get(row.clientGuid.toLowerCase()))
+        || (row.clientUuid && contactCacheByUuid.get(row.clientUuid.toLowerCase()))
+        || contactCacheByName.get(normalizeName(row.clientName))
+        || null;
       const cachedContact = (row.clientGuid && clientsByGuid.get(row.clientGuid.toLowerCase()))
         || (row.clientUuid && clientsByUuid.get(row.clientUuid.toLowerCase()))
         || clientsByName.get(normalizeName(row.clientName))
@@ -279,16 +442,19 @@ function buildRecentPurchases(
         date: row.date.toISOString(),
         clientName: row.clientName,
         clientGuid: row.clientGuid,
-        phone: row.clientPhone ?? cachedContact?.phone ?? null,
+        phone: row.clientPhone ?? dbContact?.phone ?? cachedContact?.phone ?? null,
         product: row.product,
         amount: row.amount,
+        isNewClient: firstPurchaseByClient.get(row.clientKey)?.getTime() === row.date.getTime(),
       };
     });
 }
 
-function buildPromotionCampaigns(records: SalesRecord[]) {
+function buildPromotionCampaigns(records: SalesRecord[], getPhone: (record: SalesRecord) => string | null) {
   const passProducts = [...new Set(records.filter((row) => row.isPass).map((row) => row.product))];
   const nowTs = Date.now();
+  const today = getNowInTimeZone(BUSINESS_TIME_ZONE);
+  const todayKey = `${today.year}-${String(today.month).padStart(2, "0")}-${String(today.day).padStart(2, "0")}`;
 
   return passProducts
     .map((productName) => {
@@ -310,13 +476,16 @@ function buildPromotionCampaigns(records: SalesRecord[]) {
         const daysSinceCampaignPurchase = Math.max(0, Math.floor((nowTs - purchase.date.getTime()) / 86400000));
         const daysSinceLastPurchase = Math.max(0, Math.floor((nowTs - latestPurchase.date.getTime()) / 86400000));
         const hasFollowUp = followUpPurchases.length > 0;
-        const pending = !hasFollowUp && daysSinceCampaignPurchase < 30;
+        const isPastValidity = purchase.passExpiresDayKey !== null && purchase.passExpiresDayKey < todayKey;
+        const pending = !hasFollowUp && !isPastValidity
+          && (purchase.passExpiresDayKey !== null || daysSinceCampaignPurchase < 30);
         const inactiveAfterFollowUp = hasFollowUp && daysSinceLastPurchase > 30;
         const retained = hasFollowUp && !inactiveAfterFollowUp;
 
         return {
           name: purchase.clientName,
           clientGuid: purchase.clientGuid,
+          phone: getPhone(purchase),
           purchaseDate: purchase.date.toISOString(),
           campaignAmount: purchase.amount,
           retained,
@@ -406,14 +575,38 @@ function buildAnalytics(
     phone: string | null;
     activeEntries: number | null;
   }[],
+  cachedClientContacts: {
+    clientKey: string;
+    clientGuid: string | null;
+    clientUuid: string | null;
+    normalizedName: string;
+    email: string | null;
+    phone: string | null;
+  }[],
   importedSnapshot?: {
     revenueByMonth: Map<string, number>;
+    fitsseyRevenueByMonth: Map<string, number>;
+    manualRevenueByMonth: Map<string, number>;
+    expensesByMonth: Map<string, number>;
     mrrByMonth: Map<string, number>;
   },
 ) {
   const clientsByGuid = new Map<string, { email: string | null; phone: string | null; activeEntries: number | null }>();
   const clientsByUuid = new Map<string, { email: string | null; phone: string | null; activeEntries: number | null }>();
   const clientsByName = new Map<string, { email: string | null; phone: string | null; activeEntries: number | null }>();
+  const clientsByKey = new Map<string, { email: string | null; phone: string | null; activeEntries: number | null }>();
+  const mergeContact = (
+    map: Map<string, { email: string | null; phone: string | null; activeEntries: number | null }>,
+    key: string,
+    contact: { email: string | null; phone: string | null; activeEntries: number | null },
+  ) => {
+    const existing = map.get(key);
+    map.set(key, {
+      email: existing?.email ?? contact.email,
+      phone: existing?.phone ?? contact.phone,
+      activeEntries: existing?.activeEntries ?? contact.activeEntries,
+    });
+  };
   for (const row of cachedClients) {
     const contact = { email: row.email, phone: row.phone, activeEntries: row.activeEntries };
     const guidKey = safeText(row.externalGuid).toLowerCase();
@@ -423,12 +616,39 @@ function buildAnalytics(
     if (uuidKey) clientsByUuid.set(uuidKey, contact);
     if (nameKey) clientsByName.set(nameKey, contact);
   }
+  for (const row of cachedClientContacts) {
+    const contact = { email: row.email, phone: row.phone, activeEntries: null };
+    if (row.clientKey) clientsByKey.set(row.clientKey.toLowerCase(), contact);
+    const guidKey = safeText(row.clientGuid).toLowerCase();
+    const uuidKey = safeText(row.clientUuid).toLowerCase();
+    const nameKey = normalizeName(row.normalizedName);
+    if (guidKey) mergeContact(clientsByGuid, guidKey, contact);
+    if (uuidKey) mergeContact(clientsByUuid, uuidKey, contact);
+    if (nameKey) mergeContact(clientsByName, nameKey, contact);
+  }
+  const getClientPhone = (row: SalesRecord) => row.clientPhone
+    ?? clientsByKey.get(row.clientKey.toLowerCase())?.phone
+    ?? (row.clientGuid ? clientsByGuid.get(row.clientGuid.toLowerCase())?.phone : null)
+    ?? (row.clientUuid ? clientsByUuid.get(row.clientUuid.toLowerCase())?.phone : null)
+    ?? clientsByName.get(normalizeName(row.clientName))?.phone
+    ?? null;
 
-  const importedMonths = importedSnapshot ? [...new Set([...importedSnapshot.revenueByMonth.keys(), ...importedSnapshot.mrrByMonth.keys()])] : [];
+  const importedMonths = importedSnapshot
+    ? [...new Set([
+        ...importedSnapshot.revenueByMonth.keys(),
+        ...importedSnapshot.expensesByMonth.keys(),
+        ...importedSnapshot.mrrByMonth.keys(),
+      ])]
+    : [];
   const months = [...new Set([...records.map((row) => row.month), ...importedMonths])].sort();
   const latestMonth = months.at(-1) ?? null;
   const previousMonth = months.length > 1 ? months.at(-2) ?? null : null;
+  const salesMonths = [...new Set(records.map((row) => row.month))].sort();
+  const latestSalesMonth = salesMonths.at(-1) ?? null;
+  const previousSalesMonth = salesMonths.length > 1 ? salesMonths.at(-2) ?? null : null;
   const revenueByMonth = createMonthlyObject(months, 0);
+  const fitsseyRevenueByMonth = createMonthlyObject(months, 0);
+  const expensesByMonth = createMonthlyObject(months, 0);
   const mrrByMonth = createMonthlyObject(months, 0);
   const passesSoldByMonth = createMonthlyObject(months, 0);
   const salesByMonth = createMonthlyObject(months, 0);
@@ -440,6 +660,7 @@ function buildAnalytics(
 
   for (const row of records) {
     revenueByMonth[row.month] += row.amount;
+    fitsseyRevenueByMonth[row.month] += row.amount;
     salesByMonth[row.month] += 1;
     if (row.isPass) {
       mrrByMonth[row.month] += row.amount;
@@ -453,6 +674,7 @@ function buildAnalytics(
   if (importedSnapshot) {
     for (const month of months) {
       revenueByMonth[month] = Math.round(importedSnapshot.revenueByMonth.get(month) || 0);
+      expensesByMonth[month] = Math.round(importedSnapshot.expensesByMonth.get(month) || 0);
       mrrByMonth[month] = Math.round(importedSnapshot.mrrByMonth.get(month) || 0);
     }
   }
@@ -490,7 +712,7 @@ function buildAnalytics(
   for (let i = 0; i < months.length; i += 1) {
     const month = months[i];
     activeClientsByMonth[month] = uniqueClientsByMonth[month].size;
-    arpuByMonth[month] = uniqueClientsByMonth[month].size > 0 ? revenueByMonth[month] / uniqueClientsByMonth[month].size : 0;
+    arpuByMonth[month] = uniqueClientsByMonth[month].size > 0 ? fitsseyRevenueByMonth[month] / uniqueClientsByMonth[month].size : 0;
     if (i > 0) {
       const prev = uniqueClientsByMonth[months[i - 1]];
       const curr = uniqueClientsByMonth[month];
@@ -499,25 +721,32 @@ function buildAnalytics(
     }
   }
 
+  const financialMetrics = buildFinancialMetrics(revenueByMonth, expensesByMonth);
   const comparable = buildComparableMonthToDateRevenue(records);
-  const totalRevenue = Object.values(revenueByMonth).reduce((sum, value) => sum + value, 0);
   const totalSales = records.length;
   const passSales = records.filter((row) => row.isPass).length;
-  const avgTicket = totalSales > 0 ? totalRevenue / totalSales : 0;
-  const latestArpu = latestMonth ? arpuByMonth[latestMonth] || 0 : 0;
-  const latestActive = latestMonth ? activeClientsByMonth[latestMonth] || 0 : 0;
-  const latestChurn = latestMonth ? churnByMonth[latestMonth] || 0 : 0;
-  const latestMrr = latestMonth ? mrrByMonth[latestMonth] || 0 : 0;
-  const currentImportedRevenue = importedSnapshot ? Math.round(importedSnapshot.revenueByMonth.get(comparable.currentMonthKey) || 0) : 0;
-  const previousImportedRevenue = importedSnapshot ? Math.round(importedSnapshot.revenueByMonth.get(comparable.previousMonthKey) || 0) : 0;
+  const totalFitsseyRevenue = Object.values(fitsseyRevenueByMonth).reduce((sum, value) => sum + value, 0);
+  const avgTicket = totalSales > 0 ? totalFitsseyRevenue / totalSales : 0;
+  const latestArpu = latestSalesMonth ? arpuByMonth[latestSalesMonth] || 0 : 0;
+  const latestActive = latestSalesMonth ? activeClientsByMonth[latestSalesMonth] || 0 : 0;
+  const latestChurn = latestSalesMonth ? churnByMonth[latestSalesMonth] || 0 : 0;
+  const latestMrr = latestSalesMonth ? mrrByMonth[latestSalesMonth] || 0 : 0;
+  const currentImportedRevenue = importedSnapshot ? Math.round(importedSnapshot.fitsseyRevenueByMonth.get(comparable.currentMonthKey) || 0) : 0;
+  const previousImportedRevenue = importedSnapshot ? Math.round(importedSnapshot.fitsseyRevenueByMonth.get(comparable.previousMonthKey) || 0) : 0;
   const hasComparableSales = records.some((row) => row.month === comparable.currentMonthKey || row.month === comparable.previousMonthKey);
-  const currentPeriodRevenue = hasComparableSales ? comparable.currentPeriodRevenue : currentImportedRevenue;
-  const previousPeriodRevenue = hasComparableSales ? comparable.previousPeriodRevenue : 0;
-  const previousFullMonthRevenue = hasComparableSales ? comparable.previousFullMonthRevenue : previousImportedRevenue;
+  const currentFitsseyRevenue = hasComparableSales ? comparable.currentPeriodRevenue : currentImportedRevenue;
+  const previousFitsseyPeriodRevenue = hasComparableSales ? comparable.previousPeriodRevenue : 0;
+  const previousFitsseyFullMonthRevenue = hasComparableSales ? comparable.previousFullMonthRevenue : previousImportedRevenue;
+  const currentManualRevenue = importedSnapshot?.manualRevenueByMonth.get(comparable.currentMonthKey) || 0;
+  const previousManualRevenue = importedSnapshot?.manualRevenueByMonth.get(comparable.previousMonthKey) || 0;
+  const currentPeriodRevenue = currentFitsseyRevenue + currentManualRevenue;
+  const previousPeriodRevenue = previousFitsseyPeriodRevenue + previousManualRevenue;
+  const previousFullMonthRevenue = previousFitsseyFullMonthRevenue + previousManualRevenue;
   const revenueMoMChange = previousPeriodRevenue > 0 ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100 : null;
 
   for (const row of records) {
-    const cachedContact = (row.clientGuid && clientsByGuid.get(row.clientGuid.toLowerCase()))
+    const cachedContact = clientsByKey.get(row.clientKey.toLowerCase())
+      || (row.clientGuid && clientsByGuid.get(row.clientGuid.toLowerCase()))
       || (row.clientUuid && clientsByUuid.get(row.clientUuid.toLowerCase()))
       || clientsByName.get(normalizeName(row.clientName))
       || null;
@@ -573,8 +802,8 @@ function buildAnalytics(
         ? Math.max(0, Math.floor((nowTs - client.lastSingleEntryDate.getTime()) / 86400000))
         : null;
       const expectedCycleDays = client.lastPassPurchaseDate ? estimatePassCycleDays(client.passPurchaseDates) : null;
-      const hasPassLatest = latestMonth ? client.passMonths.has(latestMonth) : false;
-      const hasPurchaseLatest = latestMonth ? client.purchaseMonths.has(latestMonth) : false;
+      const hasPassLatest = latestSalesMonth ? client.passMonths.has(latestSalesMonth) : false;
+      const hasPurchaseLatest = latestSalesMonth ? client.purchaseMonths.has(latestSalesMonth) : false;
       const hasNotConvertedSingle = client.lastSingleEntryDate && client.passPurchaseDates.length === 0;
 
       let score = 0;
@@ -644,10 +873,10 @@ function buildAnalytics(
     .sort((a, b) => b.score - a.score || a.daysSinceLastPurchase - b.daysSinceLastPurchase || b.lifetimeRevenue - a.lifetimeRevenue)
     .slice(0, 200);
 
-  const selectedMonths = [previousMonth, latestMonth].filter((month): month is string => Boolean(month));
+  const selectedMonths = [previousSalesMonth, latestSalesMonth].filter((month): month is string => Boolean(month));
   const selectedSet = new Set(selectedMonths);
-  const latestClients = latestMonth ? uniqueClientsByMonth[latestMonth] : new Set<string>();
-  const previousClients = previousMonth ? uniqueClientsByMonth[previousMonth] : new Set<string>();
+  const latestClients = latestSalesMonth ? uniqueClientsByMonth[latestSalesMonth] : new Set<string>();
+  const previousClients = previousSalesMonth ? uniqueClientsByMonth[previousSalesMonth] : new Set<string>();
   const segmentSales = records
     .filter((row) => selectedSet.has(row.month))
     .sort((a, b) => b.date.getTime() - a.date.getTime())
@@ -658,7 +887,7 @@ function buildAnalytics(
       product: row.product,
       amount: row.amount,
       monthLinkStatus:
-        row.month === latestMonth
+        row.month === latestSalesMonth
           ? previousClients.has(row.clientKey)
             ? "Kupował też w poprzednim"
             : "Brak zakupu w poprzednim"
@@ -672,20 +901,22 @@ function buildAnalytics(
     months,
     latestMonth,
     previousMonth,
-    totalRevenue,
     totalSales,
     latestActive,
     latestRevenue: latestMonth ? revenueByMonth[latestMonth] || 0 : 0,
     previousRevenue: previousMonth ? revenueByMonth[previousMonth] || 0 : 0,
+    ...financialMetrics,
+    currentFitsseyRevenue,
+    currentManualRevenue,
+    currentPeriodRevenue,
+    previousPeriodRevenue,
+    previousFullMonthRevenue,
+    revenueMoMChange,
     latestMrr,
     latestArpu,
     latestChurn,
     avgTicket,
     passShare: totalSales > 0 ? (passSales / totalSales) * 100 : 0,
-    currentPeriodRevenue,
-    previousPeriodRevenue,
-    previousFullMonthRevenue,
-    revenueMoMChange,
     revenueByMonth,
     mrrByMonth,
     passesSoldByMonth,
@@ -695,15 +926,15 @@ function buildAnalytics(
     activeClientsByMonth,
     dailyRevenue: buildDailyRevenueSeries(records),
     contacts,
-    recentPurchases: buildRecentPurchases(records, cachedClients),
-    promotionCampaigns: buildPromotionCampaigns(records),
+    recentPurchases: buildRecentPurchases(records, cachedClientContacts, cachedClients),
+    promotionCampaigns: buildPromotionCampaigns(records, getClientPhone),
     newClientSales: segmentSales.filter((sale) => sale.isNewForMonth).slice(0, 100),
     returningClientSales: segmentSales.filter((sale) => !sale.isNewForMonth).slice(0, 100),
     clientsSummary: buildClientsSummary(records, months),
   };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   const { userId } = await auth();
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -717,11 +948,30 @@ export async function GET() {
       : null;
     const studioUuid = settings?.studioUuid?.trim() || process.env.FITSSEY_STUDIO_UUID?.trim() || "";
     const cachedClients = await getCachedFitsseyClients();
+    const cachedClientContacts = await getCachedClientContacts();
     const records = await getCachedSalesRecords();
-    const importedSnapshot = await getImportedRevenueSnapshot();
-    const analytics = buildAnalytics(records, cachedClients, importedSnapshot);
+    const cashflowSnapshot = await getCashflowSnapshot();
+    const analytics = buildAnalytics(records, cachedClients, cachedClientContacts, cashflowSnapshot);
+    const chartProducts = [...new Set(records.map((row) => row.product))]
+      .sort((left, right) => left.localeCompare(right, "pl"));
+    const requestedProducts = [...new Set(new URL(request.url).searchParams.getAll("product").map((product) => product.trim()).filter(Boolean))];
+    const allowedProducts = new Set(chartProducts);
+    const selectedProducts = requestedProducts.filter((product) => allowedProducts.has(product));
+    if (selectedProducts.length !== requestedProducts.length) {
+      return NextResponse.json({ error: "Wybrany produkt nie istnieje w danych sprzedażowych." }, { status: 400 });
+    }
+    const filteredChartAnalytics = requestedProducts.length > 0
+      ? buildFilteredChartAnalytics(
+          records,
+          records.filter((row) => selectedProducts.includes(row.product)),
+          analytics.months,
+          cashflowSnapshot,
+        )
+      : null;
     return NextResponse.json({
       ...analytics,
+      ...filteredChartAnalytics,
+      chartProducts,
       studioUuid,
       welcomeSmsMessage: settings?.welcomeSmsMessage || DEFAULT_WELCOME_SMS_MESSAGE,
       smsTemplates: normalizeSmsTemplates(settings?.smsTemplates, settings?.welcomeSmsMessage || DEFAULT_WELCOME_SMS_MESSAGE),

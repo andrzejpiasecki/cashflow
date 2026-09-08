@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { MessageCircle, PartyPopper } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { MessageCircle, PartyPopper, Search } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, LabelList, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { AppShell } from "@/components/app-shell";
@@ -17,16 +17,30 @@ type DashboardPayload = {
   latestArpu: number;
   latestChurn: number;
   latestActive: number;
+  totalRevenue: number;
+  currentFitsseyRevenue: number;
+  currentManualRevenue: number;
+  totalExpenses: number;
+  totalNet: number;
+  currentMonthRevenue: number;
+  currentMonthExpenses: number;
+  currentMonthNet: number;
+  previousMonthRevenue: number;
+  previousMonthExpenses: number;
+  previousMonthNet: number;
   currentPeriodRevenue: number;
   previousPeriodRevenue: number;
   previousFullMonthRevenue: number;
   revenueMoMChange: number | null;
   revenueByMonth: Record<string, number>;
+  expensesByMonth: Record<string, number>;
+  netByMonth: Record<string, number>;
   mrrByMonth: Record<string, number>;
   passesSoldByMonth?: Record<string, number>;
   newClientsByMonth: Record<string, number>;
   returningClientsByMonth: Record<string, number>;
   productCount: Record<string, number>;
+  chartProducts?: string[];
   activeClientsByMonth: Record<string, number>;
   dailyRevenue: { labels: string[]; values: number[]; previousValues: number[] };
   recentPurchases: {
@@ -36,6 +50,7 @@ type DashboardPayload = {
     phone: string | null;
     product: string;
     amount: number;
+    isNewClient: boolean;
   }[];
   contacts: {
     name: string;
@@ -79,6 +94,7 @@ type PromotionCampaign = {
   rows: {
     name: string;
     clientGuid: string | null;
+    phone: string | null;
     purchaseDate: string;
     campaignAmount: number;
     retained: boolean;
@@ -95,6 +111,9 @@ type PromotionCampaign = {
   }[];
 };
 
+type PromotionCampaignSortKey = "name" | "purchaseDate" | "campaignAmount" | "status" | "daysSinceLastPurchase" | "nextProduct" | "daysToNextPurchase" | "followUpProducts" | "followUpRevenue";
+type SortDirection = "asc" | "desc";
+
 const money = new Intl.NumberFormat("pl-PL", { style: "decimal", maximumFractionDigits: 0 });
 const tooltipStyle = {
   background: "#ffffff",
@@ -105,12 +124,60 @@ const tooltipStyle = {
 };
 const chartMargin = { top: 24, right: 10, left: -10, bottom: 0 };
 
+function buildDashboardUrl(params: URLSearchParams) {
+  const query = params.toString();
+  return query ? `/api/fitssey/dashboard?${query}` : "/api/fitssey/dashboard";
+}
+
 export default function DashboardPage() {
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
   const [selectedPromotionProduct, setSelectedPromotionProduct] = useState("");
+  const [selectedChartProducts, setSelectedChartProducts] = useState<string[]>([]);
+  const [draftChartProducts, setDraftChartProducts] = useState<string[]>([]);
+  const [areChartsLoading, setAreChartsLoading] = useState(false);
+  const [dashboardRefreshVersion, setDashboardRefreshVersion] = useState(0);
+  const hasLoadedDashboard = useRef(false);
+  const appliedChartProducts = useRef<string[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = async () => {
+      if (hasLoadedDashboard.current) setAreChartsLoading(true);
+      setError("");
+      try {
+        const params = new URLSearchParams();
+        for (const product of selectedChartProducts) params.append("product", product);
+        const response = await fetch(buildDashboardUrl(params), { signal: controller.signal });
+        const payload = (await response.json().catch(() => ({}))) as DashboardPayload;
+        if (!response.ok) {
+          setError(payload.error ?? "Nie udało się pobrać dashboardu Fitssey.");
+          const fallbackProducts = response.status === 400 ? [] : appliedChartProducts.current;
+          setSelectedChartProducts(fallbackProducts);
+          setDraftChartProducts(fallbackProducts);
+          return;
+        }
+        setData(payload);
+        appliedChartProducts.current = selectedChartProducts;
+      } catch (loadError) {
+        if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+          setError("Nie udało się pobrać dashboardu Fitssey.");
+          setSelectedChartProducts(appliedChartProducts.current);
+          setDraftChartProducts(appliedChartProducts.current);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          hasLoadedDashboard.current = true;
+          setIsLoading(false);
+          setAreChartsLoading(false);
+        }
+      }
+    };
+    void load();
+    return () => controller.abort();
+  }, [dashboardRefreshVersion, selectedChartProducts]);
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 767px)");
@@ -121,38 +188,7 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    const load = async () => {
-      setIsLoading(true);
-      setError("");
-      try {
-        const response = await fetch("/api/fitssey/dashboard");
-        const payload = (await response.json().catch(() => ({}))) as DashboardPayload;
-        if (!response.ok) {
-          setError(payload.error ?? "Nie udało się pobrać dashboardu Fitssey.");
-          return;
-        }
-        setData(payload);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    void load();
-  }, []);
-
-  useEffect(() => {
-    const reloadAfterAutoImport = () => {
-      const load = async () => {
-        setError("");
-        const response = await fetch("/api/fitssey/dashboard");
-        const payload = (await response.json().catch(() => ({}))) as DashboardPayload;
-        if (!response.ok) {
-          setError(payload.error ?? "Nie udało się pobrać dashboardu Fitssey.");
-          return;
-        }
-        setData(payload);
-      };
-      void load();
-    };
+    const reloadAfterAutoImport = () => setDashboardRefreshVersion((version) => version + 1);
 
     window.addEventListener("fitssey:auto-import-completed", reloadAfterAutoImport);
     return () => window.removeEventListener("fitssey:auto-import-completed", reloadAfterAutoImport);
@@ -164,6 +200,8 @@ export default function DashboardPage() {
     return data.months.map((month) => ({
       month: formatMonthKey(month),
       revenue: Math.round(data.revenueByMonth[month] ?? 0),
+      expenses: Math.round(data.expensesByMonth[month] ?? 0),
+      net: Math.round(data.netByMonth[month] ?? 0),
       passesSold: passesSoldByMonth[month] ?? 0,
       newClients: data.newClientsByMonth[month] ?? 0,
       returningClients: data.returningClientsByMonth[month] ?? 0,
@@ -185,22 +223,39 @@ export default function DashboardPage() {
     return data.promotionCampaigns.find((campaign) => campaign.productName === selectedPromotionProduct) ?? data.promotionCampaigns[0];
   }, [data, selectedPromotionProduct]);
 
+  const toggleChartProduct = (product: string) => {
+    setDraftChartProducts((current) => current.includes(product)
+      ? current.filter((selectedProduct) => selectedProduct !== product)
+      : [...current, product]);
+  };
+
   return (
     <AppShell title="Dashboard">
       {isLoading ? (
         <div className="rounded-2xl border border-slate-200/70 bg-white/90 p-4 text-sm text-muted-foreground shadow-[0_12px_32px_rgba(11,22,39,0.06)] backdrop-blur-sm">
           Ładowanie dashboardu...
         </div>
-      ) : error ? (
-        <div className="rounded-2xl border border-rose-300 bg-rose-50 p-4 text-sm text-rose-700">{error}</div>
-      ) : !data ? null : (
+      ) : !data ? (
+        error ? <div className="rounded-2xl border border-rose-300 bg-rose-50 p-4 text-sm text-rose-700">{error}</div> : null
+      ) : (
         <div className="fitssey-dashboard grid gap-4">
-          <section className="rounded-2xl border border-slate-200/70 bg-[radial-gradient(140%_120%_at_0%_0%,rgba(139,140,255,0.30),rgba(203,236,255,0.28),rgba(255,255,255,0.6))] p-4 shadow-[0_12px_32px_rgba(11,22,39,0.06)]">
+          {error && <div className="rounded-2xl border border-rose-300 bg-rose-50 p-4 text-sm text-rose-700">{error}</div>}
+          <ChartProductFilter
+            products={data.chartProducts ?? []}
+            selectedProducts={draftChartProducts}
+            appliedProducts={selectedChartProducts}
+            isLoading={areChartsLoading}
+            onApply={() => setSelectedChartProducts(draftChartProducts)}
+            onClear={() => setDraftChartProducts([])}
+            onToggle={toggleChartProduct}
+          />
+
+          <section className={`rounded-2xl border border-slate-200/70 bg-[radial-gradient(140%_120%_at_0%_0%,rgba(139,140,255,0.30),rgba(203,236,255,0.28),rgba(255,255,255,0.6))] p-4 shadow-[0_12px_32px_rgba(11,22,39,0.06)] transition-opacity ${areChartsLoading ? "opacity-60" : ""}`}>
             <div className="mb-4 rounded-2xl border border-slate-200/70 bg-white/85 px-5 py-4">
               <p className="text-xs font-extrabold tracking-[0.06em] text-sky-600 sm:text-sm">REFORMA DASHBOARD</p>
             </div>
             <div className="rounded-2xl border border-slate-200/70 bg-white/90 p-4 shadow-[0_8px_20px_rgba(11,22,39,0.05)]">
-              <p className="mb-3 text-lg font-extrabold leading-tight text-slate-800 sm:text-xl">Przychód miesiąc do miesiąca</p>
+              <p className="mb-3 text-lg font-extrabold leading-tight text-slate-800 sm:text-xl">Przychód</p>
               <div className="grid gap-3 sm:grid-cols-2">
                 <SummaryTile
                   label="Aktualny miesiąc"
@@ -223,11 +278,21 @@ export default function DashboardPage() {
                   valueClass={data.revenueMoMChange == null ? "text-slate-800" : data.revenueMoMChange >= 0 ? "text-emerald-700" : "text-rose-700"}
                   sublabel="vs poprzedni miesiąc"
                 />
+                <SummaryTile
+                  label="Przychód Fitssey"
+                  value={money.format(data.currentFitsseyRevenue)}
+                  sublabel="aktualny miesiąc"
+                />
+                <SummaryTile
+                  label="Przychód ręczny"
+                  value={money.format(data.currentManualRevenue)}
+                  sublabel="aktualny miesiąc"
+                />
               </div>
             </div>
           </section>
 
-          <section className="grid gap-3">
+          <section className={`grid gap-3 transition-opacity ${areChartsLoading ? "opacity-60" : ""}`}>
             <ChartCard title="Przychód miesięczny">
               <ChartWrap>
                 <ResponsiveContainer width="100%" height="100%">
@@ -319,10 +384,13 @@ export default function DashboardPage() {
           </section>
 
           <PromotionCampaignSection
+            key={selectedPromotionCampaign?.productName ?? "none"}
             campaigns={data.promotionCampaigns ?? []}
             selectedCampaign={selectedPromotionCampaign}
             selectedProduct={selectedPromotionCampaign?.productName ?? ""}
             studioUuid={data.studioUuid}
+            smsTemplates={data.smsTemplates}
+            welcomeSmsMessage={data.welcomeSmsMessage}
             onSelectProduct={setSelectedPromotionProduct}
           />
 
@@ -359,6 +427,115 @@ function SummaryTile({
   );
 }
 
+function ChartProductFilter({
+  products,
+  selectedProducts,
+  appliedProducts,
+  isLoading,
+  onApply,
+  onClear,
+  onToggle,
+}: {
+  products: string[];
+  selectedProducts: string[];
+  appliedProducts: string[];
+  isLoading: boolean;
+  onApply: () => void;
+  onClear: () => void;
+  onToggle: (product: string) => void;
+}) {
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const hasChanges = !haveSameProducts(selectedProducts, appliedProducts);
+  const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase("pl-PL");
+  const filteredProducts = normalizedSearchQuery
+    ? products.filter((product) => product.toLocaleLowerCase("pl-PL").includes(normalizedSearchQuery))
+    : products;
+  const selectionLabel = selectedProducts.length === 0
+    ? "Wszystkie"
+    : selectedProducts.length === 1
+      ? selectedProducts[0]
+      : `${selectedProducts.length} wybrane`;
+
+  return (
+    <div className="relative z-30 rounded-2xl border border-slate-200/70 bg-white/90 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)] backdrop-blur-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-semibold text-slate-800">Produkty uwzględniane na wykresach</p>
+          <p className="text-xs text-slate-500">Filtr dotyczy części przychodów z Fitssey oraz statystyk klientów. Ręczne przychody i wszystkie koszty pozostają uwzględnione.</p>
+        </div>
+        {isLoading && <span className="text-xs font-semibold text-sky-700" role="status">Przeliczanie...</span>}
+      </div>
+      <details ref={detailsRef} className="group relative mt-3 max-w-xl">
+        <summary className="flex min-h-10 cursor-pointer list-none items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none marker:hidden focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
+          <span className="truncate">{selectionLabel}</span>
+          <span className="text-xs text-slate-500 group-open:rotate-180" aria-hidden="true">▼</span>
+        </summary>
+        <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+          <div className="max-h-64 overflow-y-auto p-2">
+            <label className="relative mb-1 block">
+              <span className="sr-only">Szukaj produktu</span>
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Szukaj produktu..."
+                className="min-h-9 w-full rounded-lg border border-slate-200 bg-white py-1.5 pr-3 pl-8 text-sm text-slate-800 outline-none placeholder:text-slate-400 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+              />
+            </label>
+            <button
+              type="button"
+              aria-pressed={selectedProducts.length === 0}
+              onClick={onClear}
+              className={`flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm font-semibold hover:bg-slate-50 ${selectedProducts.length === 0 ? "text-sky-700" : "text-slate-800"}`}
+            >
+              <span className={`inline-flex h-4 w-4 items-center justify-center rounded-full border ${selectedProducts.length === 0 ? "border-sky-600 bg-sky-600 text-white" : "border-slate-300"}`} aria-hidden="true">
+                {selectedProducts.length === 0 ? "✓" : ""}
+              </span>
+              Wszystkie
+            </button>
+            {filteredProducts.map((product) => (
+              <label key={product} className="flex cursor-pointer items-start gap-2 rounded-lg px-2 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                <input
+                  type="checkbox"
+                  checked={selectedProducts.includes(product)}
+                  onChange={() => onToggle(product)}
+                  className="mt-0.5 h-4 w-4 shrink-0 accent-sky-600"
+                />
+                <span>{product}</span>
+              </label>
+            ))}
+            {products.length === 0 ? (
+              <p className="px-2 py-2 text-xs text-slate-500">Brak produktów w danych sprzedażowych.</p>
+            ) : filteredProducts.length === 0 ? (
+              <p className="px-2 py-2 text-xs text-slate-500">Brak produktów pasujących do wyszukiwania.</p>
+            ) : null}
+          </div>
+          <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 px-3 py-2">
+            <span className="text-xs text-slate-500">{hasChanges ? "Niezastosowane zmiany" : "Filtr aktualny"}</span>
+            <button
+              type="button"
+              onClick={() => {
+                detailsRef.current?.removeAttribute("open");
+                onApply();
+              }}
+              disabled={!hasChanges || isLoading}
+              className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              Zastosuj
+            </button>
+          </div>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function haveSameProducts(left: string[], right: string[]) {
+  return left.length === right.length && left.every((product) => right.includes(product));
+}
+
 function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="min-w-0 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/90 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)] backdrop-blur-sm">
@@ -386,14 +563,37 @@ function PromotionCampaignSection({
   selectedCampaign,
   selectedProduct,
   studioUuid,
+  smsTemplates,
+  welcomeSmsMessage,
   onSelectProduct,
 }: {
   campaigns: PromotionCampaign[];
   selectedCampaign: PromotionCampaign | null;
   selectedProduct: string;
   studioUuid?: string;
+  smsTemplates?: SmsTemplate[];
+  welcomeSmsMessage?: string;
   onSelectProduct: (product: string) => void;
 }) {
+  const [sortBy, setSortBy] = useState<{ key: PromotionCampaignSortKey; direction: SortDirection }>({ key: "purchaseDate", direction: "desc" });
+  const templates = smsTemplates?.length
+    ? smsTemplates
+    : [{ id: "welcome", label: "Powitalny", message: welcomeSmsMessage ?? "" }];
+  const [selectedTemplateId, setSelectedTemplateId] = useState(templates[0]?.id ?? "welcome");
+  const selectedTemplate = templates.find((template) => template.id === selectedTemplateId) ?? templates[0];
+
+  const sortedCampaignRows = useMemo(() => {
+    const rows = selectedCampaign?.rows ?? [];
+    return [...rows].sort((left, right) => comparePromotionRows(left, right, sortBy.key, sortBy.direction));
+  }, [selectedCampaign, sortBy]);
+
+  const toggleSort = (key: PromotionCampaignSortKey) => {
+    setSortBy((current) => ({
+      key,
+      direction: current.key === key && current.direction === "desc" ? "asc" : "desc",
+    }));
+  };
+
   return (
     <TableCard title="Analiza promocji / karnetu">
       {campaigns.length === 0 || !selectedCampaign ? (
@@ -438,31 +638,48 @@ function PromotionCampaignSection({
               : selectedCampaign.topNextProducts.map((product) => `${product.name} (${product.count})`).join(", ")}
           </div>
 
+          <label className="grid max-w-sm gap-1 text-xs font-semibold text-slate-700">
+            Typ SMS-a z szablonu
+            <select
+              value={selectedTemplate?.id ?? ""}
+              onChange={(event) => setSelectedTemplateId(event.target.value)}
+              className="min-h-9 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+            >
+              {templates.map((template) => (
+                <option key={template.id} value={template.id}>{template.label}</option>
+              ))}
+            </select>
+          </label>
+
           <div className="max-w-full overflow-x-auto">
             <Table className="min-w-[1160px] text-xs">
               <TableHeader>
                 <TableRow>
-                  <TableHead>Klient</TableHead>
-                  <TableHead>Zakup promocji</TableHead>
-                  <TableHead className="text-right">Kwota</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Dni od ost. zakupu</TableHead>
-                  <TableHead>Kolejny zakup</TableHead>
-                  <TableHead className="text-right">Dni do zakupu</TableHead>
-                  <TableHead>Co kupił potem</TableHead>
-                  <TableHead className="text-right">Przychód potem</TableHead>
+                  <SortablePromotionHead label="Klient" sortKey="name" sortBy={sortBy} onSort={toggleSort} />
+                  <SortablePromotionHead label="Zakup promocji" sortKey="purchaseDate" sortBy={sortBy} onSort={toggleSort} />
+                  <SortablePromotionHead label="Kwota" sortKey="campaignAmount" sortBy={sortBy} onSort={toggleSort} align="right" />
+                  <SortablePromotionHead label="Status" sortKey="status" sortBy={sortBy} onSort={toggleSort} />
+                  <SortablePromotionHead label="Dni od ost. zakupu" sortKey="daysSinceLastPurchase" sortBy={sortBy} onSort={toggleSort} align="right" />
+                  <SortablePromotionHead label="Kolejny zakup" sortKey="nextProduct" sortBy={sortBy} onSort={toggleSort} />
+                  <SortablePromotionHead label="Dni do zakupu" sortKey="daysToNextPurchase" sortBy={sortBy} onSort={toggleSort} align="right" />
+                  <SortablePromotionHead label="Co kupił potem" sortKey="followUpProducts" sortBy={sortBy} onSort={toggleSort} />
+                  <SortablePromotionHead label="Przychód potem" sortKey="followUpRevenue" sortBy={sortBy} onSort={toggleSort} align="right" />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {selectedCampaign.rows.length === 0 ? (
+                {sortedCampaignRows.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={9} className="text-muted-foreground">Brak klientów dla tej promocji.</TableCell>
                   </TableRow>
                 ) : (
-                  selectedCampaign.rows.map((row) => (
+                  sortedCampaignRows.map((row) => (
                     <TableRow key={`${row.name}-${row.purchaseDate}`} className={getPromotionStatusRowClass(row)}>
                       <TableCell>
-                        <ClientNameLink name={row.name} studioUuid={studioUuid} clientGuid={row.clientGuid} />
+                        <div className="flex items-center gap-2">
+                          <ClientNameLink name={row.name} studioUuid={studioUuid} clientGuid={row.clientGuid} />
+                          <SmsLink phone={row.phone} clientName={row.name} />
+                          <TemplateSmsLink phone={row.phone} clientName={row.name} template={selectedTemplate} />
+                        </div>
                       </TableCell>
                       <TableCell>{new Date(row.purchaseDate).toLocaleDateString("pl-PL")}</TableCell>
                       <TableCell className="text-right">{money.format(row.campaignAmount)}</TableCell>
@@ -501,6 +718,7 @@ function RecentPurchasesTable({
     phone: string | null;
     product: string;
     amount: number;
+    isNewClient: boolean;
   }[];
   studioUuid?: string;
   smsTemplates?: SmsTemplate[];
@@ -528,10 +746,11 @@ function RecentPurchasesTable({
       </label>
 
       <div className="max-w-full overflow-x-auto">
-      <Table className="min-w-[780px] text-xs">
+      <Table className="min-w-[860px] text-xs">
         <TableHeader>
           <TableRow>
             <TableHead>Klient</TableHead>
+            <TableHead>Nowy klient</TableHead>
             <TableHead>Co kupił</TableHead>
             <TableHead>Data</TableHead>
             <TableHead className="text-right">Kwota</TableHead>
@@ -540,19 +759,26 @@ function RecentPurchasesTable({
         <TableBody>
           {rows.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={4} className="text-muted-foreground">
+              <TableCell colSpan={5} className="text-muted-foreground">
                 Brak zakupów.
               </TableCell>
             </TableRow>
           ) : (
             rows.map((row) => (
-              <TableRow key={`${row.clientName}-${row.date}-${row.product}`}>
+              <TableRow key={`${row.clientName}-${row.date}-${row.product}`} className={row.isNewClient ? "bg-emerald-50/70" : ""}>
                 <TableCell>
                   <div className="flex items-center gap-2">
                     <ClientNameLink name={row.clientName} studioUuid={studioUuid} clientGuid={row.clientGuid} />
                     <SmsLink phone={row.phone} clientName={row.clientName} />
                     <TemplateSmsLink phone={row.phone} clientName={row.clientName} template={selectedTemplate} />
                   </div>
+                </TableCell>
+                <TableCell>
+                  {row.isNewClient ? (
+                    <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">Tak</span>
+                  ) : (
+                    <span className="text-slate-400">Nie</span>
+                  )}
                 </TableCell>
                 <TableCell>{row.product}</TableCell>
                 <TableCell>{new Date(row.date).toLocaleDateString("pl-PL")}</TableCell>
@@ -565,6 +791,74 @@ function RecentPurchasesTable({
       </div>
     </div>
   );
+}
+
+function SortablePromotionHead({
+  label,
+  sortKey,
+  sortBy,
+  onSort,
+  align,
+}: {
+  label: string;
+  sortKey: PromotionCampaignSortKey;
+  sortBy: { key: PromotionCampaignSortKey; direction: SortDirection };
+  onSort: (key: PromotionCampaignSortKey) => void;
+  align?: "right";
+}) {
+  const active = sortBy.key === sortKey;
+  return (
+    <TableHead
+      className={`${active ? "bg-sky-50 text-sky-900" : "text-slate-600"} ${align === "right" ? "text-right" : ""}`}
+      aria-sort={active ? (sortBy.direction === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={`group inline-flex w-full items-center gap-1.5 rounded-md px-1 py-1 text-xs font-semibold transition-colors hover:bg-slate-100 ${align === "right" ? "justify-end" : "justify-start"}`}
+      >
+        <span>{label}</span>
+        <span
+          className={`relative inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
+            active ? "border-sky-200 bg-sky-100" : "border-transparent bg-transparent opacity-0 group-hover:opacity-60"
+          }`}
+          aria-hidden="true"
+        >
+          <span
+            className={`block h-1.5 w-1.5 border-r-2 border-b-2 ${active ? "border-sky-700" : "border-slate-400"} ${
+              active && sortBy.direction === "asc" ? "rotate-[225deg] translate-y-0.5" : "rotate-45 -translate-y-0.5"
+            }`}
+          />
+        </span>
+      </button>
+    </TableHead>
+  );
+}
+
+function comparePromotionRows(
+  left: PromotionCampaign["rows"][number],
+  right: PromotionCampaign["rows"][number],
+  key: PromotionCampaignSortKey,
+  direction: SortDirection,
+) {
+  const getValue = (row: PromotionCampaign["rows"][number]): string | number => {
+    if (key === "name") return row.name;
+    if (key === "purchaseDate") return new Date(row.purchaseDate).getTime();
+    if (key === "campaignAmount") return row.campaignAmount;
+    if (key === "status") return getPromotionStatusLabel(row);
+    if (key === "daysSinceLastPurchase") return row.daysSinceLastPurchase;
+    if (key === "nextProduct") return row.nextProduct ?? "";
+    if (key === "daysToNextPurchase") return row.daysToNextPurchase ?? Number.POSITIVE_INFINITY;
+    if (key === "followUpProducts") return row.followUpProducts.join(", ");
+    return row.followUpRevenue;
+  };
+
+  const leftValue = getValue(left);
+  const rightValue = getValue(right);
+  const result = typeof leftValue === "number" && typeof rightValue === "number"
+    ? leftValue - rightValue
+    : String(leftValue).localeCompare(String(rightValue), "pl", { sensitivity: "base" });
+  return direction === "asc" ? result : -result;
 }
 
 function ClientsTable({
