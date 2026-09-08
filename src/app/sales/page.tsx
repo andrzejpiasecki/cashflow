@@ -4,15 +4,22 @@ import { useEffect, useMemo, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { buildGroupSmsHref, normalizeSmsPhone, prepareSalesSms } from "@/lib/sales-sms";
 
 type LeadPriority = "wysoki" | "sredni" | "niski";
 type LeadStage = "new" | "contacted" | "offer" | "won" | "lost";
 type LeadSegment = "single_to_pass" | "pass_renewal" | "inactive";
 type LeadSortKey = "name" | "segment" | "reason" | "priority" | "stage" | "lastPurchaseDate" | "daysSinceLastPurchase" | "activeEntries" | "email" | "phone" | "lifetimeRevenue";
 type SortDirection = "asc" | "desc";
+type SmsTemplate = {
+  id: string;
+  label: string;
+  message: string;
+};
 
 type SalesPayload = {
   studioUuid?: string;
+  smsTemplates?: SmsTemplate[];
   contacts: {
     name: string;
     clientGuid: string | null;
@@ -20,6 +27,7 @@ type SalesPayload = {
     daysSinceLastPurchase: number;
     lastPassPurchaseDate?: string | null;
     daysSinceLastPass?: number | null;
+    purchasedPasses: string[];
     activeEntries?: number | null;
     lifetimeRevenue: number;
     email: string | null;
@@ -84,6 +92,13 @@ export default function SalesPage() {
   const [query, setQuery] = useState("");
   const [priorityFilter, setPriorityFilter] = useState<"all" | LeadPriority>("all");
   const [reasonFilter, setReasonFilter] = useState<"all" | "single" | "pass" | "inactive">("all");
+  const [lastPurchaseFrom, setLastPurchaseFrom] = useState("");
+  const [lastPurchaseTo, setLastPurchaseTo] = useState("");
+  const [daysWithoutPurchaseFrom, setDaysWithoutPurchaseFrom] = useState("");
+  const [daysWithoutPurchaseTo, setDaysWithoutPurchaseTo] = useState("");
+  const [selectedPasses, setSelectedPasses] = useState<string[]>([]);
+  const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>([]);
+  const [selectedSmsTemplateId, setSelectedSmsTemplateId] = useState("");
   const [stages, setStages] = useState<Record<string, LeadStage>>({});
   const [sortBy, setSortBy] = useState<{ key: LeadSortKey; direction: SortDirection } | null>(null);
 
@@ -150,21 +165,48 @@ export default function SalesPage() {
     return counts;
   }, [data]);
 
+  const passOptions = useMemo(() => {
+    const names = (data?.contacts ?? []).flatMap((lead) => lead.purchasedPasses);
+    return [...new Set(names)].sort((a, b) => a.localeCompare(b, "pl"));
+  }, [data]);
+
   const filteredLeads = useMemo(() => {
     const leads = data?.contacts ?? [];
+    const purchaseFromTime = lastPurchaseFrom ? new Date(`${lastPurchaseFrom}T00:00:00`).getTime() : null;
+    const purchaseToTime = lastPurchaseTo ? new Date(`${lastPurchaseTo}T23:59:59.999`).getTime() : null;
+    const minimumDays = daysWithoutPurchaseFrom === "" ? null : Number(daysWithoutPurchaseFrom);
+    const maximumDays = daysWithoutPurchaseTo === "" ? null : Number(daysWithoutPurchaseTo);
+    const selectedPassSet = new Set(selectedPasses);
+
     return leads.filter((lead) => {
       if (priorityFilter !== "all" && lead.priority !== priorityFilter) return false;
       const segment = getLeadSegment(lead.reason);
       if (reasonFilter === "single" && segment !== "single_to_pass") return false;
       if (reasonFilter === "pass" && segment !== "pass_renewal") return false;
       if (reasonFilter === "inactive" && segment !== "inactive") return false;
+      const purchaseTime = new Date(lead.lastPurchaseDate).getTime();
+      if (purchaseFromTime !== null && purchaseTime < purchaseFromTime) return false;
+      if (purchaseToTime !== null && purchaseTime > purchaseToTime) return false;
+      if (minimumDays !== null && lead.daysSinceLastPurchase < minimumDays) return false;
+      if (maximumDays !== null && lead.daysSinceLastPurchase > maximumDays) return false;
+      if (selectedPassSet.size > 0 && !lead.purchasedPasses.some((pass) => selectedPassSet.has(pass))) return false;
       if (query.trim()) {
         const text = `${lead.name} ${lead.reason} ${lead.email ?? ""} ${lead.phone ?? ""}`.toLowerCase();
         if (!text.includes(query.toLowerCase().trim())) return false;
       }
       return true;
     });
-  }, [data, priorityFilter, reasonFilter, query]);
+  }, [data, priorityFilter, reasonFilter, lastPurchaseFrom, lastPurchaseTo, daysWithoutPurchaseFrom, daysWithoutPurchaseTo, selectedPasses, query]);
+
+  useEffect(() => {
+    const visibleIds = new Set(filteredLeads
+      .filter((lead) => Boolean(normalizeSmsPhone(lead.phone)))
+      .map(getLeadId));
+    setSelectedLeadIds((previous) => {
+      const next = previous.filter((id) => visibleIds.has(id));
+      return next.length === previous.length ? previous : next;
+    });
+  }, [filteredLeads]);
 
   const stageBuckets = useMemo(() => {
     const buckets: Record<LeadStage, SalesPayload["contacts"]> = {
@@ -240,6 +282,31 @@ export default function SalesPage() {
     return sorted;
   }, [filteredLeads, sortBy, stages]);
 
+  const selectableVisibleLeadIds = sortedLeads
+    .filter((lead) => Boolean(normalizeSmsPhone(lead.phone)))
+    .map(getLeadId);
+  const allVisibleLeadsSelected = selectableVisibleLeadIds.length > 0
+    && selectableVisibleLeadIds.every((id) => selectedLeadIds.includes(id));
+  const selectedLeads = filteredLeads.filter((lead) => selectedLeadIds.includes(getLeadId(lead)) && Boolean(normalizeSmsPhone(lead.phone)));
+  const smsTemplates = data?.smsTemplates ?? [];
+  const selectedSmsTemplate = smsTemplates.find((template) => template.id === selectedSmsTemplateId) ?? smsTemplates[0];
+  const groupSms = prepareSalesSms(selectedLeads, selectedSmsTemplate?.message ?? "");
+
+  const openGroupSms = () => {
+    if (!groupSms.phones.length || !groupSms.message) return;
+    window.location.href = buildGroupSmsHref(groupSms.phones, groupSms.message, navigator.userAgent);
+  };
+
+  const toggleLeadSelection = (leadId: string, isSelected: boolean) => {
+    setSelectedLeadIds((previous) => isSelected
+      ? [...new Set([...previous, leadId])]
+      : previous.filter((id) => id !== leadId));
+  };
+
+  const toggleVisibleLeadSelection = () => {
+    setSelectedLeadIds(allVisibleLeadsSelected ? [] : [...new Set(selectableVisibleLeadIds)]);
+  };
+
   const toggleSort = (key: LeadSortKey) => {
     setSortBy((previous) => {
       if (!previous || previous.key !== key) {
@@ -282,41 +349,135 @@ export default function SalesPage() {
           </section>
 
           <section className="rounded-2xl border border-slate-200/70 bg-white/90 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)]">
-            <div className="grid gap-2 md:grid-cols-4">
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Szukaj klienta, email, telefon..."
-                className="h-9 rounded-md border border-slate-300 px-3 text-sm outline-none ring-slate-300 focus:ring-2"
-              />
-              <select
-                value={priorityFilter}
-                onChange={(event) => setPriorityFilter(event.target.value as "all" | LeadPriority)}
-                className="h-9 rounded-md border border-slate-300 px-3 text-sm outline-none ring-slate-300 focus:ring-2"
-              >
-                <option value="all">Priorytet: wszystkie</option>
-                <option value="wysoki">Wysoki</option>
-                <option value="sredni">Średni</option>
-                <option value="niski">Niski</option>
-              </select>
-              <select
-                value={reasonFilter}
-                onChange={(event) => setReasonFilter(event.target.value as "all" | "single" | "pass" | "inactive")}
-                className="h-9 rounded-md border border-slate-300 px-3 text-sm outline-none ring-slate-300 focus:ring-2"
-              >
-                <option value="all">Powód: wszystkie</option>
-                <option value="single">Po wejściu pojedynczym ({reasonOptions.single})</option>
-                <option value="pass">Nieprzedłużony karnet ({reasonOptions.pass})</option>
-                <option value="inactive">Brak aktywności ({reasonOptions.inactive})</option>
-              </select>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <label className="grid gap-1 text-[11px] font-semibold text-slate-600">
+                Szukaj
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Klient, email, telefon..."
+                  className="h-9 min-w-0 rounded-md border border-slate-300 px-3 text-sm font-normal outline-none ring-slate-300 focus:ring-2"
+                />
+              </label>
+              <label className="grid gap-1 text-[11px] font-semibold text-slate-600">
+                Typ leada
+                <select
+                  value={reasonFilter}
+                  onChange={(event) => setReasonFilter(event.target.value as "all" | "single" | "pass" | "inactive")}
+                  className="h-9 min-w-0 rounded-md border border-slate-300 px-3 text-sm font-normal outline-none ring-slate-300 focus:ring-2"
+                >
+                  <option value="all">Wszystkie</option>
+                  <option value="single">Po wejściu pojedynczym ({reasonOptions.single})</option>
+                  <option value="pass">Nieprzedłużony karnet ({reasonOptions.pass})</option>
+                  <option value="inactive">Brak aktywności ({reasonOptions.inactive})</option>
+                </select>
+              </label>
+              <label className="grid gap-1 text-[11px] font-semibold text-slate-600">
+                Priorytet
+                <select
+                  value={priorityFilter}
+                  onChange={(event) => setPriorityFilter(event.target.value as "all" | LeadPriority)}
+                  className="h-9 min-w-0 rounded-md border border-slate-300 px-3 text-sm font-normal outline-none ring-slate-300 focus:ring-2"
+                >
+                  <option value="all">Wszystkie</option>
+                  <option value="wysoki">Wysoki</option>
+                  <option value="sredni">Średni</option>
+                  <option value="niski">Niski</option>
+                </select>
+              </label>
+              <div className="grid gap-1">
+                <span className="text-[11px] font-semibold text-slate-600">Kupiony karnet</span>
+                <details className="group relative">
+                  <summary className="flex h-9 cursor-pointer list-none items-center justify-between gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm outline-none ring-slate-300 focus:ring-2 [&::-webkit-details-marker]:hidden">
+                    <span className="truncate">
+                      {selectedPasses.length === 0
+                        ? "Wszystkie"
+                        : selectedPasses.length === 1
+                          ? selectedPasses[0]
+                          : `Wybrano: ${selectedPasses.length}`}
+                    </span>
+                    <span className="text-[10px] text-slate-500 transition-transform group-open:rotate-180">▼</span>
+                  </summary>
+                  <div className="absolute z-20 mt-1 max-h-64 w-72 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-md border border-slate-200 bg-white p-2 shadow-lg">
+                    {passOptions.length === 0 ? (
+                      <p className="px-2 py-1 text-xs text-slate-500">Brak karnetów w historii leadów.</p>
+                    ) : (
+                      passOptions.map((pass) => (
+                        <label key={pass} className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-sm hover:bg-slate-50">
+                          <input
+                            type="checkbox"
+                            checked={selectedPasses.includes(pass)}
+                            onChange={(event) => {
+                              setSelectedPasses((previous) => event.target.checked
+                                ? [...previous, pass]
+                                : previous.filter((selected) => selected !== pass));
+                            }}
+                            className="mt-0.5 size-4 rounded border-slate-300"
+                          />
+                          <span>{pass}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </details>
+              </div>
+              <div className="grid gap-1">
+                <span className="text-[11px] font-semibold text-slate-600">Ostatni zakup</span>
+                <div className="grid grid-cols-2 gap-1">
+                  <input
+                    type="date"
+                    aria-label="Ostatni zakup od"
+                    value={lastPurchaseFrom}
+                    onChange={(event) => setLastPurchaseFrom(event.target.value)}
+                    className="h-9 min-w-0 rounded-md border border-slate-300 px-2 text-xs outline-none ring-slate-300 focus:ring-2"
+                  />
+                  <input
+                    type="date"
+                    aria-label="Ostatni zakup do"
+                    value={lastPurchaseTo}
+                    onChange={(event) => setLastPurchaseTo(event.target.value)}
+                    className="h-9 min-w-0 rounded-md border border-slate-300 px-2 text-xs outline-none ring-slate-300 focus:ring-2"
+                  />
+                </div>
+              </div>
+              <div className="grid gap-1">
+                <span className="text-[11px] font-semibold text-slate-600">Dni bez zakupu</span>
+                <div className="grid grid-cols-2 gap-1">
+                  <input
+                    type="number"
+                    min="0"
+                    inputMode="numeric"
+                    aria-label="Dni bez zakupu od"
+                    placeholder="Od"
+                    value={daysWithoutPurchaseFrom}
+                    onChange={(event) => setDaysWithoutPurchaseFrom(event.target.value)}
+                    className="h-9 min-w-0 rounded-md border border-slate-300 px-2 text-sm font-normal outline-none ring-slate-300 focus:ring-2"
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    inputMode="numeric"
+                    aria-label="Dni bez zakupu do"
+                    placeholder="Do"
+                    value={daysWithoutPurchaseTo}
+                    onChange={(event) => setDaysWithoutPurchaseTo(event.target.value)}
+                    className="h-9 min-w-0 rounded-md border border-slate-300 px-2 text-sm font-normal outline-none ring-slate-300 focus:ring-2"
+                  />
+                </div>
+              </div>
               <button
                 type="button"
                 onClick={() => {
                   setQuery("");
                   setPriorityFilter("all");
                   setReasonFilter("all");
+                  setLastPurchaseFrom("");
+                  setLastPurchaseTo("");
+                  setDaysWithoutPurchaseFrom("");
+                  setDaysWithoutPurchaseTo("");
+                  setSelectedPasses([]);
                 }}
-                className="h-9 rounded-md border border-slate-300 bg-white px-3 text-sm hover:bg-slate-50"
+                className="h-9 self-end rounded-md border border-slate-300 bg-white px-3 text-sm hover:bg-slate-50"
               >
                 Wyczyść filtry
               </button>
@@ -343,8 +504,72 @@ export default function SalesPage() {
             ))}
           </section>
 
+          <section className="rounded-2xl border border-sky-200/80 bg-sky-50/60 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)]">
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(240px,0.7fr)_auto] lg:items-end">
+              <div>
+                <p className="text-sm font-semibold text-slate-900">Wysyłka grupowa SMS</p>
+                <p className="mt-1 text-xs text-slate-600">
+                  Wybrano klientów z numerem telefonu: <span className="font-semibold text-slate-900">{selectedLeads.length}</span>
+                </p>
+                {selectedSmsTemplate ? (
+                  <p className="mt-2 whitespace-pre-wrap text-xs text-slate-600">Treść: {groupSms.message}</p>
+                ) : null}
+              </div>
+              <label className="grid gap-1 text-[11px] font-semibold text-slate-600">
+                Typ SMS-a
+                <select
+                  value={selectedSmsTemplate?.id ?? ""}
+                  onChange={(event) => setSelectedSmsTemplateId(event.target.value)}
+                  disabled={smsTemplates.length === 0}
+                  className="h-9 rounded-md border border-slate-300 bg-white px-3 text-sm font-normal outline-none ring-slate-300 focus:ring-2 disabled:bg-slate-100"
+                >
+                  {smsTemplates.length === 0 ? <option value="">Brak szablonów SMS</option> : null}
+                  {smsTemplates.map((template) => (
+                    <option key={template.id} value={template.id}>{template.label}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={openGroupSms}
+                  disabled={groupSms.phones.length === 0 || !groupSms.message}
+                  className="h-9 rounded-md bg-sky-700 px-3 text-sm font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Wyślij SMS ({groupSms.phones.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedLeadIds([])}
+                  disabled={selectedLeadIds.length === 0}
+                  className="h-9 rounded-md border border-slate-300 bg-white px-3 text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Wyczyść zaznaczenie
+                </button>
+              </div>
+            </div>
+            <p className="mt-3 border-t border-sky-200/70 pt-2 text-[11px] text-slate-500">
+              Przycisk otwiera aplikację Wiadomości — tam zatwierdzisz wysłanie. Każdy numer dodajemy tylko raz,
+              a wysyłka obejmuje tylko zaznaczonych klientów pasujących do filtrów. Klienci ukryci przez filtry
+              tracą zaznaczenie. Przy wielu klientach pomijamy imię w treści.
+              Sposób wysyłki grupowej zależy od ustawień aplikacji Wiadomości; odbiorcy mogą widzieć pozostałe numery.
+            </p>
+          </section>
+
           <section className="rounded-2xl border border-slate-200/70 bg-white/90 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)] md:hidden">
-            <h3 className="mb-2 text-sm font-semibold text-slate-800">Leady sprzedażowe</h3>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-slate-800">Leady sprzedażowe</h3>
+              <label className="flex items-center gap-2 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={allVisibleLeadsSelected}
+                  onChange={toggleVisibleLeadSelection}
+                  disabled={selectableVisibleLeadIds.length === 0}
+                  className="size-4 rounded border-slate-300"
+                />
+                Zaznacz widocznych
+              </label>
+            </div>
             <div className="space-y-3">
               {sortedLeads.length === 0 ? (
                 <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-muted-foreground">
@@ -359,17 +584,30 @@ export default function SalesPage() {
                     <article
                       key={`${leadId}-${lead.lastPurchaseDate}`}
                       className={`rounded-xl border px-3 py-3 ${
-                        lead.priority === "wysoki" ? "border-rose-200 bg-rose-50/50" : "border-slate-200 bg-white"
+                        selectedLeadIds.includes(leadId)
+                          ? "border-sky-300 bg-sky-50/70"
+                          : lead.priority === "wysoki" ? "border-rose-200 bg-rose-50/50" : "border-slate-200 bg-white"
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold text-slate-900">
-                            <ClientNameLink name={lead.name} studioUuid={data?.studioUuid} clientGuid={lead.clientGuid} />
-                          </p>
-                          <div className="mt-1 flex flex-wrap gap-1.5">
-                            <span className={getLeadSegmentBadgeClass(segment)}>{getLeadSegmentLabel(segment)}</span>
-                            <span className={getPriorityBadgeClass(lead.priority)}>{lead.priority}</span>
+                        <div className="flex min-w-0 items-start gap-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedLeadIds.includes(leadId)}
+                            onChange={(event) => toggleLeadSelection(leadId, event.target.checked)}
+                            disabled={!normalizeSmsPhone(lead.phone)}
+                            aria-label={`Zaznacz klienta ${lead.name}`}
+                            title={normalizeSmsPhone(lead.phone) ? "Zaznacz do wysyłki SMS" : "Brak poprawnego numeru telefonu"}
+                            className="mt-0.5 size-4 shrink-0 rounded border-slate-300"
+                          />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-slate-900">
+                              <ClientNameLink name={lead.name} studioUuid={data?.studioUuid} clientGuid={lead.clientGuid} />
+                            </p>
+                            <div className="mt-1 flex flex-wrap gap-1.5">
+                              <span className={getLeadSegmentBadgeClass(segment)}>{getLeadSegmentLabel(segment)}</span>
+                              <span className={getPriorityBadgeClass(lead.priority)}>{lead.priority}</span>
+                            </div>
                           </div>
                         </div>
                         <div className="text-right">
@@ -435,11 +673,25 @@ export default function SalesPage() {
           </section>
 
           <section className="hidden rounded-2xl border border-slate-200/70 bg-white/90 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)] md:block">
-            <h3 className="mb-2 text-sm font-semibold text-slate-800">Leady sprzedażowe</h3>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-slate-800">Leady sprzedażowe</h3>
+              <span className="text-xs text-slate-500">Zaznaczono: {selectedLeads.length}</span>
+            </div>
             <div className="max-w-full overflow-x-auto">
-              <Table className="min-w-[1120px] text-xs">
+              <Table className="min-w-[1160px] text-xs">
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-10">
+                      <input
+                        type="checkbox"
+                        checked={allVisibleLeadsSelected}
+                        onChange={toggleVisibleLeadSelection}
+                        disabled={selectableVisibleLeadIds.length === 0}
+                        aria-label="Zaznacz wszystkich widocznych klientów z numerem telefonu"
+                        title="Zaznacz wszystkich widocznych klientów z numerem telefonu"
+                        className="size-4 rounded border-slate-300"
+                      />
+                    </TableHead>
                     <SortableHead label="Klient" sortKey="name" sortBy={sortBy} onSort={toggleSort} />
                     <SortableHead label="Typ leada" sortKey="segment" sortBy={sortBy} onSort={toggleSort} />
                     <SortableHead label="Powód kontaktu" sortKey="reason" sortBy={sortBy} onSort={toggleSort} />
@@ -457,7 +709,7 @@ export default function SalesPage() {
                 <TableBody>
                   {sortedLeads.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={11} className="text-muted-foreground">
+                      <TableCell colSpan={13} className="text-muted-foreground">
                         Brak leadów dla wybranych filtrów.
                       </TableCell>
                     </TableRow>
@@ -467,7 +719,21 @@ export default function SalesPage() {
                       const stage = stages[leadId] ?? defaultStage(lead.priority, lead.activeEntries);
                       const segment = getLeadSegment(lead.reason);
                       return (
-                        <TableRow key={`${leadId}-${lead.lastPurchaseDate}`} className={lead.priority === "wysoki" ? "bg-rose-50/60" : ""}>
+                        <TableRow
+                          key={`${leadId}-${lead.lastPurchaseDate}`}
+                          className={selectedLeadIds.includes(leadId) ? "bg-sky-50/80" : lead.priority === "wysoki" ? "bg-rose-50/60" : ""}
+                        >
+                          <TableCell>
+                            <input
+                              type="checkbox"
+                              checked={selectedLeadIds.includes(leadId)}
+                              onChange={(event) => toggleLeadSelection(leadId, event.target.checked)}
+                              disabled={!normalizeSmsPhone(lead.phone)}
+                              aria-label={`Zaznacz klienta ${lead.name}`}
+                              title={normalizeSmsPhone(lead.phone) ? "Zaznacz do wysyłki SMS" : "Brak poprawnego numeru telefonu"}
+                              className="size-4 rounded border-slate-300"
+                            />
+                          </TableCell>
                           <TableCell>
                             <ClientNameLink name={lead.name} studioUuid={data?.studioUuid} clientGuid={lead.clientGuid} />
                           </TableCell>

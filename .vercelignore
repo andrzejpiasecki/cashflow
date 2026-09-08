@@ -1,0 +1,17 @@
+# Local database backup
+/en_backup.db
+
+# Local workspace files
+/.codex
+/.idea
+/.clerk
+.env*
+*.tsbuildinfo
+
+# Dependencies and build output are recreated on Vercel
+/node_modules
+/.next
+/out
+/build
+/coverage
+/src/generated/prisma

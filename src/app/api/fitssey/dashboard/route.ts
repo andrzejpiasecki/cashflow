@@ -476,6 +476,7 @@ function buildAnalytics(
       lastPurchaseDate: Date;
       lastPassPurchaseDate: Date | null;
       passPurchaseDates: Date[];
+      purchasedPasses: Set<string>;
       purchaseMonths: Set<string>;
       passMonths: Set<string>;
       singleEntryCount: number;
@@ -529,6 +530,7 @@ function buildAnalytics(
       lastPurchaseDate: row.date,
       lastPassPurchaseDate: null,
       passPurchaseDates: [],
+      purchasedPasses: new Set<string>(),
       purchaseMonths: new Set<string>(),
       passMonths: new Set<string>(),
       singleEntryCount: 0,
@@ -545,6 +547,7 @@ function buildAnalytics(
     stat.purchaseMonths.add(row.month);
     if (row.isPass) {
       stat.passPurchaseDates.push(row.date);
+      stat.purchasedPasses.add(row.product);
       stat.passMonths.add(row.month);
       if (!stat.lastPassPurchaseDate || row.date > stat.lastPassPurchaseDate) stat.lastPassPurchaseDate = row.date;
     } else if (/wejsc|wejść|jednoraz/i.test(row.product)) {
@@ -625,6 +628,7 @@ function buildAnalytics(
         lastPassPurchaseDate: client.lastPassPurchaseDate?.toISOString() ?? null,
         daysSinceLastPass,
         expectedCycleDays,
+        purchasedPasses: [...client.purchasedPasses].sort((a, b) => a.localeCompare(b, "pl")),
         lifetimeRevenue: client.lifetimeRevenue,
         activeEntries: client.activeEntries,
         clientGuid: client.clientGuid,

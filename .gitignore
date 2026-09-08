@@ -47,3 +47,6 @@ next-env.d.ts
 /.clerk/
 
 .idea
+
+# Local database backup
+/en_backup.db
