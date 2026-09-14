@@ -698,11 +698,14 @@ function buildAnalytics(
       lastPurchaseDate: Date;
       lastPassPurchaseDate: Date | null;
       passPurchaseDates: Date[];
+      purchasedPasses: Set<string>;
       purchaseMonths: Set<string>;
       passMonths: Set<string>;
       singleEntryCount: number;
       lastSingleEntryDate: Date | null;
       activeEntries: number | null;
+      passExpiresDayKey: string | null;
+      passProduct: string | null;
       clientGuid: string | null;
       email: string | null;
       phone: string | null;
@@ -751,6 +754,12 @@ function buildAnalytics(
       || clientsByName.get(normalizeName(row.clientName))
       || null;
 
+    // Contact-only records do not contain entry balances; resolve that field independently.
+    const activeEntries = (row.clientGuid ? clientsByGuid.get(row.clientGuid.toLowerCase())?.activeEntries : null)
+      ?? (row.clientUuid ? clientsByUuid.get(row.clientUuid.toLowerCase())?.activeEntries : null)
+      ?? clientsByName.get(normalizeName(row.clientName))?.activeEntries
+      ?? null;
+
     const stat = clientStats.get(row.clientKey) ?? {
       name: row.clientName,
       lifetimeRevenue: 0,
@@ -758,11 +767,14 @@ function buildAnalytics(
       lastPurchaseDate: row.date,
       lastPassPurchaseDate: null,
       passPurchaseDates: [],
+      purchasedPasses: new Set<string>(),
       purchaseMonths: new Set<string>(),
       passMonths: new Set<string>(),
       singleEntryCount: 0,
       lastSingleEntryDate: null,
-      activeEntries: cachedContact?.activeEntries ?? null,
+      activeEntries,
+      passExpiresDayKey: null,
+      passProduct: null,
       clientGuid: row.clientGuid,
       email: row.clientEmail ?? cachedContact?.email ?? null,
       phone: row.clientPhone ?? cachedContact?.phone ?? null,
@@ -773,7 +785,13 @@ function buildAnalytics(
     if (row.date > stat.lastPurchaseDate) stat.lastPurchaseDate = row.date;
     stat.purchaseMonths.add(row.month);
     if (row.isPass) {
+      if (row.passExpiresDayKey && (!stat.passExpiresDayKey || row.passExpiresDayKey > stat.passExpiresDayKey)) {
+        stat.passExpiresDayKey = row.passExpiresDayKey;
+        stat.passProduct = row.product;
+      }
+      if (!stat.passProduct) stat.passProduct = row.product;
       stat.passPurchaseDates.push(row.date);
+      stat.purchasedPasses.add(row.product);
       stat.passMonths.add(row.month);
       if (!stat.lastPassPurchaseDate || row.date > stat.lastPassPurchaseDate) stat.lastPassPurchaseDate = row.date;
     } else if (/wejsc|wejść|jednoraz/i.test(row.product)) {
@@ -783,16 +801,16 @@ function buildAnalytics(
     if (!stat.email && row.clientEmail) stat.email = row.clientEmail;
     if (!stat.phone && row.clientPhone) stat.phone = row.clientPhone;
     if (!stat.clientGuid && row.clientGuid) stat.clientGuid = row.clientGuid;
-    if (stat.activeEntries === null && cachedContact?.activeEntries !== null && cachedContact?.activeEntries !== undefined) {
-      stat.activeEntries = cachedContact.activeEntries;
-    }
+    if (stat.activeEntries === null) stat.activeEntries = activeEntries;
     if (!stat.email && cachedContact?.email) stat.email = cachedContact.email;
     if (!stat.phone && cachedContact?.phone) stat.phone = cachedContact.phone;
     clientStats.set(row.clientKey, stat);
   }
 
-  const contacts = [...clientStats.values()]
-    .map((client) => {
+  const today = getNowInTimeZone(BUSINESS_TIME_ZONE);
+  const todayKey = `${today.year}-${String(today.month).padStart(2, "0")}-${String(today.day).padStart(2, "0")}`;
+  const salesClients = [...clientStats.entries()]
+    .map(([clientKey, client]) => {
       const nowTs = Date.now();
       const daysSinceLastPurchase = Math.max(0, Math.floor((Date.now() - client.lastPurchaseDate.getTime()) / 86400000));
       const daysSinceLastPass = client.lastPassPurchaseDate
@@ -809,7 +827,15 @@ function buildAnalytics(
       let score = 0;
       let reason = "";
 
-      if (hasNotConvertedSingle && daysSinceLastSingle !== null) {
+      const hasActivePass = client.activeEntries !== null
+        ? client.activeEntries > 1
+        : client.passExpiresDayKey !== null && client.passExpiresDayKey >= todayKey;
+
+      if (hasActivePass) {
+        // Purchase cadence is not evidence of expiry while the pass is still usable.
+        score = 0;
+        reason = "";
+      } else if (hasNotConvertedSingle && daysSinceLastSingle !== null) {
         if (daysSinceLastSingle > 210) {
           score = 0;
           reason = "";
@@ -820,10 +846,7 @@ function buildAnalytics(
           reason = "Jednorazowe wejscie bez konwersji na karnet";
         }
       } else if (client.lastPassPurchaseDate && !hasPassLatest && daysSinceLastPass !== null) {
-        if (client.activeEntries !== null && client.activeEntries > 1) {
-          score = 0;
-          reason = "";
-        } else if (daysSinceLastPass > 210) {
+        if (daysSinceLastPass > 210) {
           score = 0;
           reason = "";
         } else {
@@ -848,12 +871,20 @@ function buildAnalytics(
       }
 
       return {
+        clientKey,
         name: client.name,
+        hasActivePass,
+        passProduct: client.passProduct,
+        passExpiresDayKey: client.passExpiresDayKey,
+        passDaysRemaining: client.passExpiresDayKey
+          ? Math.round((Date.parse(client.passExpiresDayKey) - Date.parse(todayKey)) / 86400000)
+          : null,
         lastPurchaseDate: client.lastPurchaseDate.toISOString(),
         daysSinceLastPurchase,
         lastPassPurchaseDate: client.lastPassPurchaseDate?.toISOString() ?? null,
         daysSinceLastPass,
         expectedCycleDays,
+        purchasedPasses: [...client.purchasedPasses].sort((a, b) => a.localeCompare(b, "pl")),
         lifetimeRevenue: client.lifetimeRevenue,
         activeEntries: client.activeEntries,
         clientGuid: client.clientGuid,
@@ -863,8 +894,8 @@ function buildAnalytics(
         score: Math.round(score),
         priority: getPriority(score),
       };
-    })
-    .filter((client) => {
+    });
+  const contacts = salesClients.filter((client) => {
       if (!client.reason) return false;
       const isSingleEntryLead = client.reason.toLowerCase().includes("jednoraz");
       if (isSingleEntryLead) return client.score >= 6;
@@ -926,6 +957,7 @@ function buildAnalytics(
     activeClientsByMonth,
     dailyRevenue: buildDailyRevenueSeries(records),
     contacts,
+    salesClients,
     recentPurchases: buildRecentPurchases(records, cachedClientContacts, cachedClients),
     promotionCampaigns: buildPromotionCampaigns(records, getClientPhone),
     newClientSales: segmentSales.filter((sale) => sale.isNewForMonth).slice(0, 100),
