@@ -20,6 +20,18 @@ type SmsTemplate = {
 type SalesPayload = {
   studioUuid?: string;
   smsTemplates?: SmsTemplate[];
+  salesClients?: {
+    clientKey: string;
+    name: string;
+    clientGuid: string | null;
+    email: string | null;
+    phone: string | null;
+    hasActivePass: boolean;
+    activeEntries: number | null;
+    passProduct: string | null;
+    passExpiresDayKey: string | null;
+    passDaysRemaining: number | null;
+  }[];
   contacts: {
     name: string;
     clientGuid: string | null;
@@ -207,6 +219,14 @@ export default function SalesPage() {
       return next.length === previous.length ? previous : next;
     });
   }, [filteredLeads]);
+
+  const matchingClients = useMemo(() => {
+    const search = query.trim().toLowerCase();
+    if (!search) return [];
+    return (data?.salesClients ?? []).filter((client) =>
+      `${client.name} ${client.email ?? ""} ${client.phone ?? ""}`.toLowerCase().includes(search),
+    );
+  }, [data, query]);
 
   const stageBuckets = useMemo(() => {
     const buckets: Record<LeadStage, SalesPayload["contacts"]> = {
@@ -483,6 +503,42 @@ export default function SalesPage() {
               </button>
             </div>
           </section>
+
+          {query.trim() && (
+            <section className="rounded-2xl border border-slate-200/70 bg-white/90 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)]">
+              <h3 className="text-sm font-semibold text-slate-800">Znalezieni klienci ({matchingClients.length})</h3>
+              <p className="mt-1 text-xs text-slate-500">Klienci z historii sprzedaży, w tym osoby z aktywnym karnetem. Filtry priorytetu i powodu dotyczą leadów poniżej.</p>
+              {matchingClients.length === 0 ? (
+                <p className="mt-3 text-sm text-slate-500">Brak klientów dla wpisanej frazy.</p>
+              ) : (
+                <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                  {matchingClients.map((client) => (
+                    <article key={client.clientKey} className="rounded-xl border border-slate-200 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="font-semibold text-slate-900"><ClientNameLink name={client.name} studioUuid={data?.studioUuid} clientGuid={client.clientGuid} /></p>
+                        {client.hasActivePass && <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">Aktywny karnet</span>}
+                      </div>
+                      <p className="mt-2 text-sm text-slate-800">{client.passProduct ?? "Brak zakupionego karnetu"}</p>
+                      {client.passExpiresDayKey && (
+                        <p className="mt-1 text-sm text-slate-700">
+                          Ważny do {client.passExpiresDayKey.split("-").reverse().join(".")}
+                          {client.passDaysRemaining !== null && (client.passDaysRemaining > 0
+                            ? ` · ${client.passDaysRemaining} dni do końca ważności karnetu`
+                            : client.passDaysRemaining === 0 ? " · Ważność kończy się dzisiaj" : " · Po terminie ważności")}
+                        </p>
+                      )}
+                      <p className="mt-1 text-sm text-slate-600">Pozostałe wejścia: {client.activeEntries ?? "brak danych"}</p>
+                      {client.hasActivePass && <p className="mt-2 text-xs text-emerald-700">Korzysta z karnetu — odnowienie nie jest teraz wymagane.</p>}
+                      <div className="mt-2 flex flex-wrap gap-3 text-sm">
+                        <ContactValueLink type="email" value={client.email} />
+                        <ContactValueLink type="phone" value={client.phone} />
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
 
           <section className="grid gap-3 md:hidden">
             <div className="rounded-2xl border border-slate-200/70 bg-white/90 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)]">

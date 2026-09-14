@@ -292,6 +292,10 @@ export default function CashflowPage() {
     () => importedIncomeRows.filter((row) => months.some((month) => getCellValue(row, month.key) !== 0)),
     [importedIncomeRows, months],
   );
+  const fitsseyMonthlyTotals = useMemo(
+    () => months.map((month) => visibleImportedIncomeRows.reduce((sum, row) => sum + getCellValue(row, month.key), 0)),
+    [visibleImportedIncomeRows, months],
+  );
 
   const currentMonthKey = monthKeyFromDate(new Date());
   const displayStartMonth = months[0]?.key ?? currentMonthKey;
@@ -977,8 +981,8 @@ export default function CashflowPage() {
             <TableBody>
             <SectionHeader title="PRZYCHODY" />
             {visibleImportedIncomeRows.length > 0 && (
-              <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={months.length + 2} className="border border-slate-300 p-0">
+              <TableRow className="bg-slate-50 hover:bg-slate-50" data-fitssey-month-summary>
+                <TableCell className="border border-slate-300 p-0">
                   <Button
                     variant="ghost"
                     className="h-8 w-full justify-between rounded-none bg-slate-50 px-2 text-xs text-slate-700 hover:bg-slate-100"
@@ -987,6 +991,19 @@ export default function CashflowPage() {
                     <span>Przychody z Fitssey ({visibleImportedIncomeRows.length})</span>
                     {showFitsseyIncomeRows ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                   </Button>
+                </TableCell>
+                {fitsseyMonthlyTotals.map((value, index) => (
+                  <TableCell
+                    key={months[index].key}
+                    className={`border border-slate-300 px-2 text-right text-xs font-semibold text-emerald-700 ${
+                      months[index].key === currentMonthKey ? "bg-slate-100" : "bg-slate-50"
+                    }`}
+                  >
+                    {money.format(value)}
+                  </TableCell>
+                ))}
+                <TableCell className="border border-slate-300 bg-slate-50 px-2 text-right text-xs font-semibold text-emerald-700">
+                  {money.format(fitsseyMonthlyTotals.reduce((sum, value) => sum + value, 0))}
                 </TableCell>
               </TableRow>
             )}

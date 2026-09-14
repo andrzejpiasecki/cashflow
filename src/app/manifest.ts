@@ -5,7 +5,7 @@ export default function manifest(): MetadataRoute.Manifest {
     name: "Cashflow Real",
     short_name: "Cashflow",
     description: "Dashboard cashflow i sprzedaży Fitssey",
-    start_url: "/cashflow",
+    start_url: "/dashboard",
     scope: "/",
     display: "standalone",
     background_color: "#f6f8fb",

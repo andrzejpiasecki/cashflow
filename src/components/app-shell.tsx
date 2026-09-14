@@ -22,29 +22,50 @@ export function AppShell({ title, subtitle, children }: AppShellProps) {
   useEffect(() => {
     if (!isLoaded || !isSignedIn || !AUTO_IMPORT_PATHS.has(pathname)) return;
 
-    const now = Date.now();
-    const lastCheckedAt = Number(window.localStorage.getItem(AUTO_IMPORT_CLIENT_CHECK_KEY) ?? 0);
-    if (Number.isFinite(lastCheckedAt) && now - lastCheckedAt < AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS) return;
-    window.localStorage.setItem(AUTO_IMPORT_CLIENT_CHECK_KEY, String(now));
-
     let cancelled = false;
-    void fetch("/api/fitssey/import", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ auto: true }),
-    })
-      .then(async (response) => {
-        const payload = (await response.json().catch(() => ({}))) as { skipped?: boolean };
-        if (!cancelled && response.ok && !payload.skipped) {
-          window.dispatchEvent(new CustomEvent("fitssey:auto-import-completed"));
-        }
+    let inFlight = false;
+
+    const runAutoImportCheck = () => {
+      if (cancelled || inFlight || document.visibilityState === "hidden") return;
+      const now = Date.now();
+      const lastCheckedAt = Number(window.localStorage.getItem(AUTO_IMPORT_CLIENT_CHECK_KEY) ?? 0);
+      if (Number.isFinite(lastCheckedAt) && now - lastCheckedAt < AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS) return;
+      window.localStorage.setItem(AUTO_IMPORT_CLIENT_CHECK_KEY, String(now));
+
+      inFlight = true;
+      void fetch("/api/fitssey/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auto: true }),
       })
-      .catch(() => {
-        // Auto-refresh is opportunistic; pages still render cached data if Fitssey is unavailable.
-      });
+        .then(async (response) => {
+          const payload = (await response.json().catch(() => ({}))) as { skipped?: boolean };
+          if (!cancelled && response.ok && !payload.skipped) {
+            window.dispatchEvent(new CustomEvent("fitssey:auto-import-completed"));
+          }
+        })
+        .catch(() => {
+          // Auto-refresh is opportunistic; pages still render cached data if Fitssey is unavailable.
+        })
+        .finally(() => {
+          inFlight = false;
+        });
+    };
+
+    const runWhenVisible = () => {
+      if (document.visibilityState === "visible") runAutoImportCheck();
+    };
+
+    runAutoImportCheck();
+    const intervalId = window.setInterval(runAutoImportCheck, AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS);
+    window.addEventListener("focus", runAutoImportCheck);
+    document.addEventListener("visibilitychange", runWhenVisible);
 
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", runAutoImportCheck);
+      document.removeEventListener("visibilitychange", runWhenVisible);
     };
   }, [isLoaded, isSignedIn, pathname]);
 
@@ -84,16 +105,16 @@ export function AppShell({ title, subtitle, children }: AppShellProps) {
 
         <nav className="mt-3 grid min-h-9 grid-cols-4 gap-2">
           <Link
-            href="/cashflow"
-            className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/cashflow" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
-          >
-            Cashflow
-          </Link>
-          <Link
             href="/dashboard"
             className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/dashboard" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
           >
             Dashboard
+          </Link>
+          <Link
+            href="/cashflow"
+            className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/cashflow" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
+          >
+            Cashflow
           </Link>
           <Link
             href="/sales"
