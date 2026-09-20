@@ -709,6 +709,7 @@ function buildAnalytics(
       clientGuid: string | null;
       email: string | null;
       phone: string | null;
+      isCurrentFitsseyClient: boolean;
     }
   >();
 
@@ -747,6 +748,17 @@ function buildAnalytics(
   const previousFullMonthRevenue = previousFitsseyFullMonthRevenue + previousManualRevenue;
   const revenueMoMChange = previousPeriodRevenue > 0 ? ((currentPeriodRevenue - previousPeriodRevenue) / previousPeriodRevenue) * 100 : null;
 
+  const currentClientGuids = new Set(cachedClients.map((client) => safeText(client.externalGuid).toLowerCase()).filter(Boolean));
+  const currentClientUuids = new Set(cachedClients.map((client) => safeText(client.clientUuid).toLowerCase()).filter(Boolean));
+  const currentClientNames = new Set(cachedClients.map((client) => normalizeName(client.normalizedName)).filter(Boolean));
+  const isCurrentFitsseyClient = (row: SalesRecord) => {
+    const guid = safeText(row.clientGuid).toLowerCase();
+    if (guid) return currentClientGuids.has(guid);
+    const uuid = safeText(row.clientUuid).toLowerCase();
+    if (uuid) return currentClientUuids.has(uuid);
+    return currentClientNames.has(normalizeName(row.clientName));
+  };
+
   for (const row of records) {
     const cachedContact = clientsByKey.get(row.clientKey.toLowerCase())
       || (row.clientGuid && clientsByGuid.get(row.clientGuid.toLowerCase()))
@@ -778,6 +790,7 @@ function buildAnalytics(
       clientGuid: row.clientGuid,
       email: row.clientEmail ?? cachedContact?.email ?? null,
       phone: row.clientPhone ?? cachedContact?.phone ?? null,
+      isCurrentFitsseyClient: isCurrentFitsseyClient(row),
     };
     stat.name = row.clientName;
     stat.lifetimeRevenue += row.amount;
@@ -804,12 +817,14 @@ function buildAnalytics(
     if (stat.activeEntries === null) stat.activeEntries = activeEntries;
     if (!stat.email && cachedContact?.email) stat.email = cachedContact.email;
     if (!stat.phone && cachedContact?.phone) stat.phone = cachedContact.phone;
+    if (!stat.isCurrentFitsseyClient) stat.isCurrentFitsseyClient = isCurrentFitsseyClient(row);
     clientStats.set(row.clientKey, stat);
   }
 
   const today = getNowInTimeZone(BUSINESS_TIME_ZONE);
   const todayKey = `${today.year}-${String(today.month).padStart(2, "0")}-${String(today.day).padStart(2, "0")}`;
   const salesClients = [...clientStats.entries()]
+    .filter(([, client]) => client.isCurrentFitsseyClient)
     .map(([clientKey, client]) => {
       const nowTs = Date.now();
       const daysSinceLastPurchase = Math.max(0, Math.floor((Date.now() - client.lastPurchaseDate.getTime()) / 86400000));

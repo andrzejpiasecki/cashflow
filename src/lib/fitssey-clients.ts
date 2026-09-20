@@ -101,6 +101,12 @@ function parseClientRows(payload: unknown) {
   return Array.isArray(collection) ? (collection as FitsseyClientApiRow[]) : [];
 }
 
+function hasClientRows(payload: unknown) {
+  if (Array.isArray(payload)) return true;
+  if (!payload || typeof payload !== "object") return false;
+  return Array.isArray((payload as { collection?: unknown }).collection);
+}
+
 function parsePages(payload: unknown) {
   if (!payload || typeof payload !== "object") return 1;
   const pages = Number((payload as { pages?: unknown }).pages);
@@ -206,6 +212,9 @@ export async function fetchFitsseyClients(studioUuid: string, apiKey: string): P
   };
 
   const firstPayload = await fetchPage(1);
+  if (!hasClientRows(firstPayload)) {
+    throw new Error("Fitssey clients API returned an unexpected response format.");
+  }
   const pages = parsePages(firstPayload);
   const normalizedRows: NormalizedFitsseyClient[] = [];
 
@@ -217,6 +226,9 @@ export async function fetchFitsseyClients(studioUuid: string, apiKey: string): P
 
   for (let page = 2; page <= pages; page += 1) {
     const payload = await fetchPage(page);
+    if (!hasClientRows(payload)) {
+      throw new Error(`Fitssey clients API returned an unexpected response format on page ${page}.`);
+    }
     for (const row of parseClientRows(payload)) {
       const mapped = mapClientRow(row);
       if (!mapped) continue;
@@ -230,12 +242,16 @@ export async function fetchFitsseyClients(studioUuid: string, apiKey: string): P
 export async function syncFitsseyClientsCache(studioUuid: string, apiKey: string) {
   const fitsseyClient = getFitsseyClientDelegate();
   const fitsseyClientContact = getFitsseyClientContactDelegate();
-  if (!fitsseyClient) return { fetched: 0, upserted: 0, contactsUpserted: 0 };
+  if (!fitsseyClient) {
+    return { fetched: 0, upserted: 0, contactsUpserted: 0, deleted: 0, contactsDeleted: 0 };
+  }
 
   const normalizedRows = await fetchFitsseyClients(studioUuid, apiKey);
   const fetched = normalizedRows.length;
   let upserted = 0;
   let contactsUpserted = 0;
+  let deleted = 0;
+  let contactsDeleted = 0;
 
   try {
     for (const client of normalizedRows) {
@@ -260,14 +276,9 @@ export async function syncFitsseyClientsCache(studioUuid: string, apiKey: string
           fullName: client.fullName,
           normalizedName: client.normalizedName,
           email: client.email,
+          phone: client.phone,
         },
       });
-      if (client.phone) {
-        await fitsseyClient.updateMany({
-          where: { userId: SHARED_SCOPE_ID, externalGuid: client.externalGuid, phone: null },
-          data: { phone: client.phone },
-        });
-      }
       upserted += 1;
 
       if (fitsseyClientContact) {
@@ -277,14 +288,16 @@ export async function syncFitsseyClientsCache(studioUuid: string, apiKey: string
           clientUuid: string | null;
           fullName: string;
           normalizedName: string;
-          email?: string;
+          email: string | null;
+          phone: string | null;
         } = {
           clientGuid: client.externalGuid,
           clientUuid: client.clientUuid,
           fullName: client.fullName,
           normalizedName: client.normalizedName,
+          email: client.email,
+          phone: client.phone,
         };
-        if (client.email) updateData.email = client.email;
 
         await fitsseyClientContact.upsert({
           where: { userId_clientKey: { userId: SHARED_SCOPE_ID, clientKey } },
@@ -300,24 +313,38 @@ export async function syncFitsseyClientsCache(studioUuid: string, apiKey: string
           },
           update: updateData,
         });
-        if (client.phone) {
-          await fitsseyClientContact.updateMany({
-            where: { userId: SHARED_SCOPE_ID, clientKey, phone: null },
-            data: { phone: client.phone },
-          });
-        }
         contactsUpserted += 1;
       }
+    }
+
+    const externalGuids = [...new Set(normalizedRows.map((client) => client.externalGuid))];
+    const clientKeys = [...new Set(externalGuids.map((guid) => guid.toLowerCase()))];
+    const deletedClientsResult = await fitsseyClient.deleteMany({
+      where: {
+        userId: SHARED_SCOPE_ID,
+        ...(externalGuids.length > 0 ? { externalGuid: { notIn: externalGuids } } : {}),
+      },
+    });
+    deleted = deletedClientsResult.count;
+
+    if (fitsseyClientContact) {
+      const deletedContactsResult = await fitsseyClientContact.deleteMany({
+        where: {
+          userId: SHARED_SCOPE_ID,
+          ...(clientKeys.length > 0 ? { clientKey: { notIn: clientKeys } } : {}),
+        },
+      });
+      contactsDeleted = deletedContactsResult.count;
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes("does not exist")) {
-      return { fetched, upserted: 0, contactsUpserted };
+      return { fetched, upserted: 0, contactsUpserted, deleted, contactsDeleted };
     }
     throw error;
   }
 
-  return { fetched, upserted, contactsUpserted };
+  return { fetched, upserted, contactsUpserted, deleted, contactsDeleted };
 }
 
 async function fetchEntriesByEndpoint(baseUrl: string, headers: HeadersInit, endpointPath: string) {

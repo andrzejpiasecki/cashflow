@@ -81,6 +81,11 @@ test('a client with 70 days of pass validity remains available in client search'
   assert.equal(client.passProduct, 'Karnet 24 wejścia');
 });
 
+test('a historical buyer removed from the current Fitssey roster is not an SMS recipient', () => {
+  const clients = contacts(null, true, '2026-11-23', 'salesClients');
+  assert.equal(clients.some((client) => client.name === 'Other'), false);
+});
+
 
 test('search renders the active client and remaining validity even with no leads', () => {
   const page = fs.readFileSync(new URL('../src/app/sales/page.tsx', import.meta.url), 'utf8');
@@ -114,7 +119,7 @@ test('search renders the active client and remaining validity even with no leads
   assert.doesNotMatch(html, /Other/);
   assert.match(html, /Wysyłka grupowa SMS/);
   assert.match(html, /Wszyscy klienci z poprawnym numerem/);
-  assert.match(html, /Wszyscy \(2\)/);
+  assert.match(html, /Wszyscy \(1\)/);
   assert.match(html, /Wyślij SMS \(1\)/);
   assert.match(html, /Typ SMS-a/);
   assert.doesNotMatch(html, /SMS z szablonu/);

@@ -182,12 +182,19 @@ export default function SettingsPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
-      const payload = (await response.json().catch(() => ({}))) as { error?: string; fetched?: number; contactsUpserted?: number };
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        fetched?: number;
+        contactsUpserted?: number;
+        deleted?: number;
+        contactsDeleted?: number;
+      };
       if (!response.ok) {
-        setStatus(payload.error ?? "Nie udało się zsynchronizować kontaktów Fitssey.");
+        setStatus(payload.error ?? "Nie udało się zsynchronizować klientów Fitssey.");
         return;
       }
-      setStatus(`Kontakty zsynchronizowane: ${payload.contactsUpserted ?? 0}/${payload.fetched ?? 0}.`);
+      const removed = Math.max(payload.deleted ?? 0, payload.contactsDeleted ?? 0);
+      setStatus(`Klienci zsynchronizowani: ${payload.contactsUpserted ?? 0}/${payload.fetched ?? 0}. Usunięto nieaktualnych: ${removed}.`);
     } finally {
       setIsSyncingContacts(false);
     }
@@ -322,7 +329,7 @@ export default function SettingsPage() {
                   {isRefreshing ? "Odświeżanie..." : "Odśwież dane Fitssey"}
                 </Button>
                 <Button onClick={syncFitsseyContacts} disabled={isSaving || isRefreshing || isSyncingContacts} variant="ghost" className="h-9 w-fit border bg-white px-3">
-                  {isSyncingContacts ? "Synchronizacja..." : "Synchronizuj telefony klientów"}
+                  {isSyncingContacts ? "Synchronizacja..." : "Synchronizuj klientów"}
                 </Button>
                 </div>
               </section>
