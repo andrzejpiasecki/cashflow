@@ -92,7 +92,7 @@ test('search renders the active client and remaining validity even with no leads
       { id: 'welcome', label: 'Powitalny', message: 'Witaj {imie}' },
       { id: 'renewal', label: 'Odnowienie', message: 'Cześć {imię}, zapraszamy!' },
     ] },
-    '', false, 'kramer', 'all', 'all', '', '', '', '', [], [], 'renewal', {}, null,
+    '', false, 'kramer', 'all', 'all', '', '', '', '', [], [], 'renewal', {}, null, 'all',
   ];
   let index = 0;
   const pageContext = {
@@ -113,6 +113,9 @@ test('search renders the active client and remaining validity even with no leads
   assert.match(html, /70 dni do końca ważności karnetu/);
   assert.doesNotMatch(html, /Other/);
   assert.match(html, /Wysyłka grupowa SMS/);
+  assert.match(html, /Wszyscy klienci z poprawnym numerem/);
+  assert.match(html, /Wszyscy \(2\)/);
+  assert.match(html, /Wyślij SMS \(1\)/);
   assert.match(html, /Typ SMS-a/);
   assert.doesNotMatch(html, /SMS z szablonu/);
 

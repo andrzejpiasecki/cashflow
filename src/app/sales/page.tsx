@@ -11,6 +11,7 @@ type LeadStage = "new" | "contacted" | "offer" | "won" | "lost";
 type LeadSegment = "single_to_pass" | "pass_renewal" | "inactive";
 type LeadSortKey = "name" | "segment" | "reason" | "priority" | "stage" | "lastPurchaseDate" | "daysSinceLastPurchase" | "activeEntries" | "email" | "phone" | "lifetimeRevenue";
 type SortDirection = "asc" | "desc";
+type SmsAudience = "selected" | "all";
 type SmsTemplate = {
   id: string;
   label: string;
@@ -113,6 +114,7 @@ export default function SalesPage() {
   const [selectedSmsTemplateId, setSelectedSmsTemplateId] = useState("");
   const [stages, setStages] = useState<Record<string, LeadStage>>({});
   const [sortBy, setSortBy] = useState<{ key: LeadSortKey; direction: SortDirection } | null>(null);
+  const [smsAudience, setSmsAudience] = useState<SmsAudience>("selected");
 
   useEffect(() => {
     const load = async () => {
@@ -310,7 +312,9 @@ export default function SalesPage() {
   const selectedLeads = filteredLeads.filter((lead) => selectedLeadIds.includes(getLeadId(lead)) && Boolean(normalizeSmsPhone(lead.phone)));
   const smsTemplates = data?.smsTemplates ?? [];
   const selectedSmsTemplate = smsTemplates.find((template) => template.id === selectedSmsTemplateId) ?? smsTemplates[0];
-  const groupSms = prepareSalesSms(selectedLeads, selectedSmsTemplate?.message ?? "");
+  const allClients = data?.salesClients ?? [];
+  const smsRecipients = smsAudience === "all" ? allClients : selectedLeads;
+  const groupSms = prepareSalesSms(smsRecipients, selectedSmsTemplate?.message ?? "");
 
   const openGroupSms = () => {
     if (!groupSms.phones.length || !groupSms.message) return;
@@ -561,16 +565,38 @@ export default function SalesPage() {
           </section>
 
           <section className="rounded-2xl border border-sky-200/80 bg-sky-50/60 p-3 shadow-[0_12px_32px_rgba(11,22,39,0.06)]">
-            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(240px,0.7fr)_auto] lg:items-end">
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.6fr)_minmax(240px,0.7fr)_auto] lg:items-end">
               <div>
                 <p className="text-sm font-semibold text-slate-900">Wysyłka grupowa SMS</p>
                 <p className="mt-1 text-xs text-slate-600">
-                  Wybrano klientów z numerem telefonu: <span className="font-semibold text-slate-900">{selectedLeads.length}</span>
+                  {smsAudience === "all" ? "Wszyscy klienci z poprawnym numerem" : "Wybrani klienci z poprawnym numerem"}: {" "}
+                  <span className="font-semibold text-slate-900">{groupSms.phones.length}</span>
                 </p>
                 {selectedSmsTemplate ? (
                   <p className="mt-2 whitespace-pre-wrap text-xs text-slate-600">Treść: {groupSms.message}</p>
                 ) : null}
               </div>
+              <fieldset className="grid gap-1">
+                <legend className="text-[11px] font-semibold text-slate-600">Odbiorcy</legend>
+                <div className="grid grid-cols-2 rounded-md border border-slate-300 bg-white p-1">
+                  <button
+                    type="button"
+                    onClick={() => setSmsAudience("selected")}
+                    aria-pressed={smsAudience === "selected"}
+                    className={`h-7 rounded px-2 text-xs font-medium ${smsAudience === "selected" ? "bg-sky-700 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                  >
+                    Zaznaczeni ({selectedLeads.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSmsAudience("all")}
+                    aria-pressed={smsAudience === "all"}
+                    className={`h-7 rounded px-2 text-xs font-medium ${smsAudience === "all" ? "bg-sky-700 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                  >
+                    Wszyscy ({allClients.length})
+                  </button>
+                </div>
+              </fieldset>
               <label className="grid gap-1 text-[11px] font-semibold text-slate-600">
                 Typ SMS-a
                 <select
@@ -597,7 +623,7 @@ export default function SalesPage() {
                 <button
                   type="button"
                   onClick={() => setSelectedLeadIds([])}
-                  disabled={selectedLeadIds.length === 0}
+                  disabled={smsAudience === "all" || selectedLeadIds.length === 0}
                   className="h-9 rounded-md border border-slate-300 bg-white px-3 text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Wyczyść zaznaczenie
@@ -606,8 +632,9 @@ export default function SalesPage() {
             </div>
             <p className="mt-3 border-t border-sky-200/70 pt-2 text-[11px] text-slate-500">
               Przycisk otwiera aplikację Wiadomości — tam zatwierdzisz wysłanie. Każdy numer dodajemy tylko raz,
-              a wysyłka obejmuje tylko zaznaczonych klientów pasujących do filtrów. Klienci ukryci przez filtry
-              tracą zaznaczenie. Przy wielu klientach pomijamy imię w treści.
+              a numery brakujące lub niepoprawne są pomijane. Opcja „Wszyscy” obejmuje wszystkich klientów z historii
+              sprzedaży niezależnie od filtrów. Przy opcji „Zaznaczeni” klienci ukryci przez filtry tracą zaznaczenie.
+              Przy wielu klientach pomijamy imię w treści.
               Sposób wysyłki grupowej zależy od ustawień aplikacji Wiadomości; odbiorcy mogą widzieć pozostałe numery.
             </p>
           </section>
