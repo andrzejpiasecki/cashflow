@@ -4,10 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { defaultStage, getLeadId, LEAD_STAGE_OPTIONS, LEAD_STAGE_STORAGE_KEY, type LeadPriority, type LeadStage } from "@/lib/lead-stage";
 import { buildGroupSmsHref, normalizeSmsPhone, prepareSalesSms } from "@/lib/sales-sms";
 
-type LeadPriority = "wysoki" | "sredni" | "niski";
-type LeadStage = "new" | "contacted" | "offer" | "won" | "lost";
 type LeadSegment = "single_to_pass" | "pass_renewal" | "inactive";
 type LeadSortKey = "name" | "segment" | "reason" | "priority" | "stage" | "lastPurchaseDate" | "daysSinceLastPurchase" | "activeEntries" | "email" | "phone" | "lifetimeRevenue";
 type SortDirection = "asc" | "desc";
@@ -53,26 +52,6 @@ type SalesPayload = {
 };
 
 const money = new Intl.NumberFormat("pl-PL", { style: "decimal", maximumFractionDigits: 0 });
-const LEAD_STAGE_OPTIONS: { value: LeadStage; label: string }[] = [
-  { value: "new", label: "Do kontaktu" },
-  { value: "contacted", label: "Po 1. kontakcie" },
-  { value: "offer", label: "Oferta karnetu" },
-  { value: "won", label: "Konwersja" },
-  { value: "lost", label: "Brak decyzji" },
-];
-
-function getLeadId(lead: SalesPayload["contacts"][number]) {
-  return lead.clientGuid ?? `name:${lead.name.toLowerCase().trim()}`;
-}
-
-function defaultStage(priority: LeadPriority, activeEntries?: number | null): LeadStage {
-  if (activeEntries !== null && activeEntries !== undefined && activeEntries > 1) return "contacted";
-  if (activeEntries === 1) return "offer";
-  if (priority === "wysoki") return "new";
-  if (priority === "sredni") return "contacted";
-  return "offer";
-}
-
 function getLeadSegment(reason: string): LeadSegment {
   const normalized = reason.toLowerCase();
   if (normalized.includes("jednoraz")) return "single_to_pass";
@@ -113,6 +92,7 @@ export default function SalesPage() {
   const [selectedLeadIds, setSelectedLeadIds] = useState<string[]>([]);
   const [selectedSmsTemplateId, setSelectedSmsTemplateId] = useState("");
   const [stages, setStages] = useState<Record<string, LeadStage>>({});
+  const [stagesLoaded, setStagesLoaded] = useState(false);
   const [sortBy, setSortBy] = useState<{ key: LeadSortKey; direction: SortDirection } | null>(null);
   const [smsAudience, setSmsAudience] = useState<SmsAudience>("selected");
 
@@ -155,19 +135,23 @@ export default function SalesPage() {
   }, []);
 
   useEffect(() => {
-    const raw = window.localStorage.getItem("sales_lead_stages_v1");
-    if (!raw) return;
+    const raw = window.localStorage.getItem(LEAD_STAGE_STORAGE_KEY);
+    if (!raw) {
+      setStagesLoaded(true);
+      return;
+    }
     try {
       const parsed = JSON.parse(raw) as Record<string, LeadStage>;
       setStages(parsed);
     } catch {
       setStages({});
     }
+    setStagesLoaded(true);
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem("sales_lead_stages_v1", JSON.stringify(stages));
-  }, [stages]);
+    if (stagesLoaded) window.localStorage.setItem(LEAD_STAGE_STORAGE_KEY, JSON.stringify(stages));
+  }, [stages, stagesLoaded]);
 
   const reasonOptions = useMemo(() => {
     const leads = data?.contacts ?? [];

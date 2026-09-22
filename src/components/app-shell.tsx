@@ -13,7 +13,7 @@ type AppShellProps = {
 
 const AUTO_IMPORT_CLIENT_CHECK_KEY = "fitssey_auto_import_last_checked_at";
 const AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
-const AUTO_IMPORT_PATHS = new Set(["/cashflow", "/dashboard", "/sales"]);
+const AUTO_IMPORT_PATHS = new Set(["/cashflow", "/dashboard", "/sales", "/client-history"]);
 
 export function AppShell({ title, subtitle, children }: AppShellProps) {
   const pathname = usePathname();
@@ -103,7 +103,7 @@ export function AppShell({ title, subtitle, children }: AppShellProps) {
           </div>
         </div>
 
-        <nav className="mt-3 grid min-h-9 grid-cols-4 gap-2">
+        <nav className="mt-3 grid min-h-9 grid-cols-2 gap-2 sm:grid-cols-5">
           <Link
             href="/dashboard"
             className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/dashboard" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
@@ -121,6 +121,12 @@ export function AppShell({ title, subtitle, children }: AppShellProps) {
             className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/sales" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
           >
             Sprzedaż
+          </Link>
+          <Link
+            href="/client-history"
+            className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/client-history" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
+          >
+            Historia klientów
           </Link>
           <Link
             href="/settings"
