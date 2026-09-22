@@ -258,8 +258,9 @@ export default function ClientHistoryPage() {
         {loading ? <p className="p-6 text-sm text-slate-600">Ładowanie historii zakupów…</p> : visible.length === 0 ? <p className="p-6 text-sm text-slate-600">Brak klientów pasujących do filtrów.</p> : <div className="h-[calc(100dvh-245px)] min-h-72 overflow-auto">
           <table className="border-separate border-spacing-0 text-xs" aria-label="Historia zakupów klientów">
             <thead className="sticky top-0 z-20 bg-slate-100 text-slate-700"><tr>
-              <th scope="col" className="sticky left-0 z-30 w-10 min-w-10 border-b border-r bg-slate-100 px-2 py-2 text-center"><input type="checkbox" aria-label="Zaznacz widocznych klientów z numerem telefonu" checked={allVisibleSelected} onChange={toggleVisibleSelection} disabled={selectableKeys.length === 0} className="h-4 w-4 accent-sky-700" /></th>
-              <th scope="col" className="sticky left-10 z-30 min-w-52 border-b border-r bg-slate-100 px-3 py-2 text-left"><button type="button" onClick={() => setSortKey("name")} className="inline-flex items-center gap-1 font-semibold">Klient {sortMark("name")}</button></th>
+              <th scope="col" className="sticky left-0 z-30 w-10 min-w-10 border-b border-r bg-slate-100 px-1 py-2 text-center font-semibold">Lp.</th>
+              <th scope="col" className="sticky left-10 z-30 w-10 min-w-10 border-b border-r bg-slate-100 px-2 py-2 text-center"><input type="checkbox" aria-label="Zaznacz widocznych klientów z numerem telefonu" checked={allVisibleSelected} onChange={toggleVisibleSelection} disabled={selectableKeys.length === 0} className="h-4 w-4 accent-sky-700" /></th>
+              <th scope="col" className="sticky left-20 z-30 min-w-52 border-b border-r bg-slate-100 px-3 py-2 text-left"><button type="button" onClick={() => setSortKey("name")} className="inline-flex items-center gap-1 font-semibold">Klient {sortMark("name")}</button></th>
               <th scope="col" className="min-w-36 border-b border-r px-2 py-2 text-left font-semibold">Status leada</th>
               <th scope="col" className="min-w-24 border-b border-r px-2 py-2 text-right"><button type="button" onClick={() => setSortKey("ltv")} className="inline-flex items-center gap-1 font-semibold">LTV {sortMark("ltv")}</button></th>
               <th scope="col" className="min-w-16 border-b border-r px-2 py-2 text-right"><button type="button" onClick={() => setSortKey("purchases")} className="inline-flex items-center gap-1 font-semibold">Zakupy {sortMark("purchases")}</button></th>
@@ -268,7 +269,7 @@ export default function ClientHistoryPage() {
               <th scope="col" className="min-w-16 border-b border-r px-2 py-2 text-right"><button type="button" onClick={() => setSortKey("gap")} className="inline-flex items-center gap-1 font-semibold">Przerwa {sortMark("gap")}</button></th>
               {months.map((month) => <th key={month} scope="col" className={`min-w-16 border-b border-r px-2 py-2 text-center font-semibold ${month === nowMonth ? "bg-blue-50 text-blue-800" : ""}`}>{readableMonth(month)}</th>)}
             </tr></thead>
-            <tbody>{visible.map((client) => {
+            <tbody>{visible.map((client, index) => {
               const lastPass = lastPassMonth(client);
               const gap = lastPass ? Math.max(0, monthNumber(nowMonth) - monthNumber(lastPass)) : null;
               const topLtv = client.lifetimeRevenue >= ltvStarThreshold;
@@ -282,8 +283,9 @@ export default function ClientHistoryPage() {
                 event.preventDefault();
                 toggleClientSelection(client.key, !selectedClientKeys.includes(client.key), event.shiftKey);
               }} className={`hover:bg-slate-50 ${selectedClientKeys.includes(client.key) ? "bg-sky-50" : ""}`}>
-                <td className="sticky left-0 z-10 border-b border-r bg-white px-2 py-2 text-center"><input type="checkbox" aria-label={`Zaznacz ${client.name} do SMS-a`} checked={selectedClientKeys.includes(client.key)} onChange={(event) => toggleClientSelection(client.key, event.target.checked, Boolean((event.nativeEvent as MouseEvent).shiftKey))} disabled={!normalizeSmsPhone(client.phone)} title={normalizeSmsPhone(client.phone) ? undefined : "Brak poprawnego numeru telefonu"} className="h-4 w-4 accent-sky-700 disabled:cursor-not-allowed" /></td>
-                <th scope="row" className="sticky left-10 z-10 max-w-52 truncate border-b border-r bg-white px-3 py-2 text-left font-medium text-slate-900" title={client.name}>{client.name} {gap === 0 ? "🔥" : gap !== null && gap >= 3 ? "💤" : ""} {topLtv ? "⭐" : ""}</th>
+                <td className="sticky left-0 z-10 border-b border-r bg-white px-1 py-2 text-center tabular-nums text-slate-500">{index + 1}</td>
+                <td className="sticky left-10 z-10 border-b border-r bg-white px-2 py-2 text-center"><input type="checkbox" aria-label={`Zaznacz ${client.name} do SMS-a`} checked={selectedClientKeys.includes(client.key)} onChange={(event) => toggleClientSelection(client.key, event.target.checked, Boolean((event.nativeEvent as MouseEvent).shiftKey))} disabled={!normalizeSmsPhone(client.phone)} title={normalizeSmsPhone(client.phone) ? undefined : "Brak poprawnego numeru telefonu"} className="h-4 w-4 accent-sky-700 disabled:cursor-not-allowed" /></td>
+                <th scope="row" className="sticky left-20 z-10 max-w-52 truncate border-b border-r bg-white px-3 py-2 text-left font-medium text-slate-900" title={client.name}>{client.name} {gap === 0 ? "🔥" : gap !== null && gap >= 3 ? "💤" : ""} {topLtv ? "⭐" : ""}</th>
                 <td className="border-b border-r px-1 py-1"><select aria-label={`Status leada: ${client.name}`} value={getHistoryLeadStage(stages, client, leadSource)} onChange={(event) => setStages((previous) => {
                   const next = { ...previous };
                   if (event.target.value) next[getLeadId(client)] = event.target.value as LeadStage;
