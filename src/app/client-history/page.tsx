@@ -56,6 +56,18 @@ function passCellValue(product: string) {
   return "🎟";
 }
 
+function StageSelect({ name, value, hasLead, onChange }: {
+  name: string;
+  value: LeadStage | "";
+  hasLead: boolean;
+  onChange: (stage: LeadStage | "") => void;
+}) {
+  return <select aria-label={`Status leada: ${name}`} value={value} onChange={(event) => onChange(event.target.value as LeadStage | "")} className="h-7 w-full rounded border bg-white px-1 text-[11px] md:text-xs">
+    {!hasLead && <option value="">Bez statusu</option>}
+    {LEAD_STAGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+  </select>;
+}
+
 export default function ClientHistoryPage() {
   const [data, setData] = useState<Client[]>([]);
   const [smsTemplates, setSmsTemplates] = useState<SmsTemplate[]>([]);
@@ -73,6 +85,9 @@ export default function ClientHistoryPage() {
   const [leadSources, setLeadSources] = useState<Record<string, LeadStageSource>>({});
   const [stagesLoaded, setStagesLoaded] = useState(false);
   const [selected, setSelected] = useState<{ client: Client; month: string } | null>(null);
+  const tableScrollRef = useRef<HTMLDivElement>(null);
+  const [windowStart, setWindowStart] = useState(0);
+  const [viewport, setViewport] = useState({ height: 800, mobile: false });
 
   const load = useCallback(async () => {
     setError("");
@@ -138,6 +153,19 @@ export default function ClientHistoryPage() {
     return Array.from({ length: end - start + 1 }, (_, index) => fromMonthNumber(start + index));
   }, [data, range]);
 
+  useEffect(() => {
+    if (!loading && months.length && window.matchMedia("(max-width: 767px)").matches && tableScrollRef.current) {
+      tableScrollRef.current.scrollLeft = tableScrollRef.current.scrollWidth;
+    }
+  }, [months, loading]);
+
+  useEffect(() => {
+    const updateViewport = () => setViewport({ height: window.innerHeight, mobile: window.innerWidth < 768 });
+    updateViewport();
+    window.addEventListener("resize", updateViewport);
+    return () => window.removeEventListener("resize", updateViewport);
+  }, []);
+
   const visible = useMemo(() => {
     const search = query.trim().toLocaleLowerCase("pl");
     const filtered = data.filter((client) => (!search || client.name.toLocaleLowerCase("pl").includes(search)) && (!onlyPasses || client.passCount > 0));
@@ -161,9 +189,10 @@ export default function ClientHistoryPage() {
     });
   }, [data, query, onlyPasses, sort]);
 
+  const selectedKeySet = useMemo(() => new Set(selectedClientKeys), [selectedClientKeys]);
   const selectableKeys = useMemo(() => visible.filter((client) => Boolean(normalizeSmsPhone(client.phone))).map((client) => client.key), [visible]);
-  const allVisibleSelected = selectableKeys.length > 0 && selectableKeys.every((key) => selectedClientKeys.includes(key));
-  const selectedClients = visible.filter((client) => selectedClientKeys.includes(client.key) && Boolean(normalizeSmsPhone(client.phone)));
+  const allVisibleSelected = selectableKeys.length > 0 && selectableKeys.every((key) => selectedKeySet.has(key));
+  const selectedClients = visible.filter((client) => selectedKeySet.has(client.key) && Boolean(normalizeSmsPhone(client.phone)));
   const smsRecipients = smsAudience === "all" ? data : selectedClients;
   const selectedSmsTemplate = smsTemplates.find((template) => template.id === selectedSmsTemplateId) ?? smsTemplates[0];
   const groupSms = prepareSalesSms(smsRecipients, selectedSmsTemplate?.message ?? "");
@@ -176,6 +205,19 @@ export default function ClientHistoryPage() {
     });
   }, [selectableKeys]);
 
+  useEffect(() => {
+    if (tableScrollRef.current) tableScrollRef.current.scrollTop = 0;
+    setWindowStart(0);
+  }, [visible]);
+
+  const rowHeight = viewport.mobile ? 56 : 40;
+  const rowCount = Math.ceil(Math.max(288, viewport.height - 245) / rowHeight) + 16;
+  const firstRow = Math.min(windowStart, Math.max(0, visible.length - 1));
+  const lastRow = Math.min(visible.length, firstRow + rowCount);
+  const renderedClients = visible.slice(firstRow, lastRow);
+  const topSpacerHeight = firstRow * rowHeight;
+  const bottomSpacerHeight = (visible.length - lastRow) * rowHeight;
+
   const toggleClientSelection = (key: string, checked: boolean, shiftKey = false) => {
     const anchorIndex = visible.findIndex((client) => client.key === selectionAnchor.current);
     const targetIndex = visible.findIndex((client) => client.key === key);
@@ -184,9 +226,10 @@ export default function ClientHistoryPage() {
         .filter((client) => Boolean(normalizeSmsPhone(client.phone)))
         .map((client) => client.key)
       : [key];
+    const rangeSet = new Set(rangeKeys);
     setSelectedClientKeys((previous) => checked
       ? [...new Set([...previous, ...rangeKeys])]
-      : previous.filter((item) => !rangeKeys.includes(item)));
+      : previous.filter((item) => !rangeSet.has(item)));
     if (!shiftKey || anchorIndex < 0) selectionAnchor.current = key;
   };
   const toggleVisibleSelection = () => {
@@ -221,7 +264,14 @@ export default function ClientHistoryPage() {
             {([12, 24, "all"] as const).map((value) => <button key={value} type="button" onClick={() => setRange(value)} className={`rounded px-3 py-1.5 text-sm ${range === value ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-200"}`}>{value === "all" ? "Całość" : `${value} mies.`}</button>)}
           </div>
           <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={onlyPasses} onChange={(event) => setOnlyPasses(event.target.checked)} className="h-4 w-4 accent-blue-600" />Tylko kupujący karnety</label>
-          <span className="ml-auto text-xs text-slate-600">{visible.length} klientów · Shift: zakres · Ctrl/⌘: pojedynczo</span>
+          <div className="flex items-center gap-1 md:hidden">
+            <label className="sr-only" htmlFor="mobile-client-sort">Sortuj klientów</label>
+            <select id="mobile-client-sort" value={sort.key} onChange={(event) => setSort((previous) => ({ ...previous, key: event.target.value as SortKey }))} className="h-8 rounded-md border bg-white px-1 text-xs">
+              <option value="name">Imię i nazwisko</option><option value="ltv">LTV</option><option value="purchases">Zakupy</option><option value="passes">Karnety</option><option value="recent">Ostatni zakup</option><option value="gap">Przerwa</option>
+            </select>
+            <button type="button" onClick={() => setSort((previous) => ({ ...previous, direction: previous.direction === "asc" ? "desc" : "asc" }))} aria-label={sort.direction === "asc" ? "Sortuj malejąco" : "Sortuj rosnąco"} className="flex h-8 w-8 items-center justify-center rounded-md border bg-white">{sort.direction === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}</button>
+          </div>
+          <span className="ml-auto text-xs text-slate-600">{visible.length} klientów<span className="hidden md:inline"> · Shift: zakres · Ctrl/⌘: pojedynczo</span></span>
         </div>
         <details className="mt-1 text-xs text-slate-600"><summary className="cursor-pointer font-medium text-slate-700">Legenda kolorów i oznaczeń</summary><div className="mt-2 flex flex-wrap gap-x-4 gap-y-2"><span>Kolor: typ karnetu · liczba: wejścia · blednięcie: czas od zakupu · •: inny zakup</span><span>🔥 karnet w tym miesiącu · ⭐ wysokie LTV · 💤 długa przerwa</span></div><div className="mt-2 flex flex-wrap gap-2">{products.map((product) => <span key={product} className="inline-flex items-center gap-1.5 rounded-md border bg-white px-2 py-1"><span className="h-4 w-4 rounded-sm" style={{ backgroundColor: `hsl(${hue(product)} 65% 48%)` }} />{product}</span>)}</div></details>
       </section>
@@ -255,48 +305,56 @@ export default function ClientHistoryPage() {
 
       {error && <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error} <button type="button" onClick={() => void load()} className="ml-2 font-semibold underline">Spróbuj ponownie</button></div>}
       <section className="overflow-hidden rounded-lg border bg-white shadow-sm">
-        {loading ? <p className="p-6 text-sm text-slate-600">Ładowanie historii zakupów…</p> : visible.length === 0 ? <p className="p-6 text-sm text-slate-600">Brak klientów pasujących do filtrów.</p> : <div className="h-[calc(100dvh-245px)] min-h-72 overflow-auto">
+        {loading ? <p className="p-6 text-sm text-slate-600">Ładowanie historii zakupów…</p> : visible.length === 0 ? <p className="p-6 text-sm text-slate-600">Brak klientów pasujących do filtrów.</p> : <div ref={tableScrollRef} onScroll={(event) => {
+          const nextStart = Math.max(0, Math.floor(event.currentTarget.scrollTop / rowHeight) - 8);
+          setWindowStart((previous) => previous === nextStart ? previous : nextStart);
+        }} className="h-[calc(100dvh-245px)] min-h-72 overflow-auto">
           <table className="border-separate border-spacing-0 text-xs" aria-label="Historia zakupów klientów">
             <thead className="sticky top-0 z-20 bg-slate-100 text-slate-700"><tr>
-              <th scope="col" className="sticky left-0 z-30 w-10 min-w-10 border-b border-r bg-slate-100 px-1 py-2 text-center font-semibold">Lp.</th>
-              <th scope="col" className="sticky left-10 z-30 w-10 min-w-10 border-b border-r bg-slate-100 px-2 py-2 text-center"><input type="checkbox" aria-label="Zaznacz widocznych klientów z numerem telefonu" checked={allVisibleSelected} onChange={toggleVisibleSelection} disabled={selectableKeys.length === 0} className="h-4 w-4 accent-sky-700" /></th>
-              <th scope="col" className="sticky left-20 z-30 min-w-52 border-b border-r bg-slate-100 px-3 py-2 text-left"><button type="button" onClick={() => setSortKey("name")} className="inline-flex items-center gap-1 font-semibold">Klient {sortMark("name")}</button></th>
-              <th scope="col" className="min-w-36 border-b border-r px-2 py-2 text-left font-semibold">Status leada</th>
-              <th scope="col" className="min-w-24 border-b border-r px-2 py-2 text-right"><button type="button" onClick={() => setSortKey("ltv")} className="inline-flex items-center gap-1 font-semibold">LTV {sortMark("ltv")}</button></th>
-              <th scope="col" className="min-w-16 border-b border-r px-2 py-2 text-right"><button type="button" onClick={() => setSortKey("purchases")} className="inline-flex items-center gap-1 font-semibold">Zakupy {sortMark("purchases")}</button></th>
-              <th scope="col" className="min-w-16 border-b border-r px-2 py-2 text-right"><button type="button" onClick={() => setSortKey("passes")} className="inline-flex items-center gap-1 font-semibold">Karnety {sortMark("passes")}</button></th>
-              <th scope="col" className="min-w-24 border-b border-r px-2 py-2 text-right"><button type="button" onClick={() => setSortKey("recent")} className="inline-flex items-center gap-1 font-semibold">Ostatni zakup {sortMark("recent")}</button></th>
-              <th scope="col" className="min-w-16 border-b border-r px-2 py-2 text-right"><button type="button" onClick={() => setSortKey("gap")} className="inline-flex items-center gap-1 font-semibold">Przerwa {sortMark("gap")}</button></th>
-              {months.map((month) => <th key={month} scope="col" className={`min-w-16 border-b border-r px-2 py-2 text-center font-semibold ${month === nowMonth ? "bg-blue-50 text-blue-800" : ""}`}>{readableMonth(month)}</th>)}
+              <th scope="col" className="sticky left-0 z-30 w-7 min-w-7 border-b border-r bg-slate-100 px-0.5 py-2 text-center font-semibold md:w-10 md:min-w-10">Lp.</th>
+              <th scope="col" className="sticky left-7 z-30 w-7 min-w-7 border-b border-r bg-slate-100 px-0.5 py-2 text-center md:left-10 md:w-10 md:min-w-10 md:px-2"><input type="checkbox" aria-label="Zaznacz widocznych klientów z numerem telefonu" checked={allVisibleSelected} onChange={toggleVisibleSelection} disabled={selectableKeys.length === 0} className="h-4 w-4 accent-sky-700" /></th>
+              <th scope="col" className="sticky left-14 z-30 w-32 min-w-32 border-b border-r bg-slate-100 px-1 py-2 text-left md:left-20 md:min-w-52 md:px-3"><button type="button" onClick={() => setSortKey("name")} className="inline-flex items-center gap-1 font-semibold">Klient {sortMark("name")}</button></th>
+              <th scope="col" className="hidden min-w-36 border-b border-r px-2 py-2 text-left font-semibold md:table-cell">Status leada</th>
+              <th scope="col" className="hidden min-w-24 border-b border-r px-2 py-2 text-right md:table-cell"><button type="button" onClick={() => setSortKey("ltv")} className="inline-flex items-center gap-1 font-semibold">LTV {sortMark("ltv")}</button></th>
+              <th scope="col" className="hidden min-w-16 border-b border-r px-2 py-2 text-right md:table-cell"><button type="button" onClick={() => setSortKey("purchases")} className="inline-flex items-center gap-1 font-semibold">Zakupy {sortMark("purchases")}</button></th>
+              <th scope="col" className="hidden min-w-16 border-b border-r px-2 py-2 text-right md:table-cell"><button type="button" onClick={() => setSortKey("passes")} className="inline-flex items-center gap-1 font-semibold">Karnety {sortMark("passes")}</button></th>
+              <th scope="col" className="hidden min-w-24 border-b border-r px-2 py-2 text-right md:table-cell"><button type="button" onClick={() => setSortKey("recent")} className="inline-flex items-center gap-1 font-semibold">Ostatni zakup {sortMark("recent")}</button></th>
+              <th scope="col" className="hidden min-w-16 border-b border-r px-2 py-2 text-right md:table-cell"><button type="button" onClick={() => setSortKey("gap")} className="inline-flex items-center gap-1 font-semibold">Przerwa {sortMark("gap")}</button></th>
+              {months.map((month) => <th key={month} scope="col" className={`min-w-12 border-b border-r px-1 py-2 text-center font-semibold md:min-w-16 md:px-2 ${month === nowMonth ? "bg-blue-50 text-blue-800" : ""}`}>{readableMonth(month)}</th>)}
             </tr></thead>
-            <tbody>{visible.map((client, index) => {
+            <tbody>
+              {topSpacerHeight > 0 && <tr aria-hidden="true"><td colSpan={months.length + 9} style={{ height: topSpacerHeight, padding: 0, border: 0 }} /></tr>}
+              {renderedClients.map((client, offset) => {
+              const index = firstRow + offset;
               const lastPass = lastPassMonth(client);
               const gap = lastPass ? Math.max(0, monthNumber(nowMonth) - monthNumber(lastPass)) : null;
               const topLtv = client.lifetimeRevenue >= ltvStarThreshold;
               const leadSource = leadSources[getLeadId(client)] ?? leadSources[getLeadId({ name: client.name, clientGuid: null })];
+              const stageValue = getHistoryLeadStage(stages, client, leadSource);
+              const updateStage = (stage: LeadStage | "") => setStages((previous) => {
+                const next = { ...previous };
+                if (stage) next[getLeadId(client)] = stage;
+                else delete next[getLeadId(client)];
+                return next;
+              });
               const previousPassMonth = Object.keys(client.months).filter((month) => month < months[0] && client.months[month].some((purchase) => purchase.isPass)).sort().at(-1);
               let precedingPassMonth = previousPassMonth ?? null;
               let precedingPass = previousPassMonth ? client.months[previousPassMonth].filter((purchase) => purchase.isPass).at(-1)!.product : null;
-              return <tr key={client.key} onClick={(event) => {
+              return <tr key={client.key} style={{ height: rowHeight }} onClick={(event) => {
                 if ((!event.shiftKey && !event.ctrlKey && !event.metaKey) || !normalizeSmsPhone(client.phone)) return;
                 if ((event.target as HTMLElement).closest("input, select, button, a")) return;
                 event.preventDefault();
-                toggleClientSelection(client.key, !selectedClientKeys.includes(client.key), event.shiftKey);
-              }} className={`hover:bg-slate-50 ${selectedClientKeys.includes(client.key) ? "bg-sky-50" : ""}`}>
-                <td className="sticky left-0 z-10 border-b border-r bg-white px-1 py-2 text-center tabular-nums text-slate-500">{index + 1}</td>
-                <td className="sticky left-10 z-10 border-b border-r bg-white px-2 py-2 text-center"><input type="checkbox" aria-label={`Zaznacz ${client.name} do SMS-a`} checked={selectedClientKeys.includes(client.key)} onChange={(event) => toggleClientSelection(client.key, event.target.checked, Boolean((event.nativeEvent as MouseEvent).shiftKey))} disabled={!normalizeSmsPhone(client.phone)} title={normalizeSmsPhone(client.phone) ? undefined : "Brak poprawnego numeru telefonu"} className="h-4 w-4 accent-sky-700 disabled:cursor-not-allowed" /></td>
-                <th scope="row" className="sticky left-20 z-10 max-w-52 truncate border-b border-r bg-white px-3 py-2 text-left font-medium text-slate-900" title={client.name}>{client.name} {gap === 0 ? "🔥" : gap !== null && gap >= 3 ? "💤" : ""} {topLtv ? "⭐" : ""}</th>
-                <td className="border-b border-r px-1 py-1"><select aria-label={`Status leada: ${client.name}`} value={getHistoryLeadStage(stages, client, leadSource)} onChange={(event) => setStages((previous) => {
-                  const next = { ...previous };
-                  if (event.target.value) next[getLeadId(client)] = event.target.value as LeadStage;
-                  else delete next[getLeadId(client)];
-                  return next;
-                })} className="h-7 w-full rounded border bg-white px-1 text-xs">{!leadSource && <option value="">Bez statusu</option>}{LEAD_STAGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></td>
-                <td className="border-b border-r px-2 py-2 text-right tabular-nums">{money.format(client.lifetimeRevenue)} zł</td>
-                <td className="border-b border-r px-2 py-2 text-right tabular-nums">{client.purchaseCount}</td>
-                <td className="border-b border-r px-2 py-2 text-right tabular-nums">{client.passCount}</td>
-                <td className="border-b border-r px-2 py-2 text-right tabular-nums">{dateLabel.format(new Date(client.lastPurchaseDate))}</td>
-                <td className="border-b border-r px-2 py-2 text-right tabular-nums">{gap === null ? "—" : `${gap} mies.`}</td>
+                toggleClientSelection(client.key, !selectedKeySet.has(client.key), event.shiftKey);
+              }} className={`hover:bg-slate-50 ${selectedKeySet.has(client.key) ? "bg-sky-50" : ""}`}>
+                <td className="sticky left-0 z-10 w-7 min-w-7 border-b border-r bg-white px-0.5 py-2 text-center tabular-nums text-slate-500 md:w-10 md:min-w-10">{index + 1}</td>
+                <td className="sticky left-7 z-10 w-7 min-w-7 border-b border-r bg-white px-0.5 py-2 text-center md:left-10 md:w-10 md:min-w-10 md:px-2"><input type="checkbox" aria-label={`Zaznacz ${client.name} do SMS-a`} checked={selectedKeySet.has(client.key)} onChange={(event) => toggleClientSelection(client.key, event.target.checked, Boolean((event.nativeEvent as MouseEvent).shiftKey))} disabled={!normalizeSmsPhone(client.phone)} title={normalizeSmsPhone(client.phone) ? undefined : "Brak poprawnego numeru telefonu"} className="h-4 w-4 accent-sky-700 disabled:cursor-not-allowed" /></td>
+                <th scope="row" className="sticky left-14 z-10 w-32 min-w-32 max-w-32 border-b border-r bg-white px-1 py-1 text-left font-medium text-slate-900 md:left-20 md:min-w-52 md:max-w-52 md:px-3 md:py-2" title={client.name}><span className="block truncate">{client.name} {gap === 0 ? "🔥" : gap !== null && gap >= 3 ? "💤" : ""} {topLtv ? "⭐" : ""}</span><span className="mt-0.5 block md:hidden"><StageSelect name={client.name} value={stageValue} hasLead={Boolean(leadSource)} onChange={updateStage} /></span></th>
+                <td className="hidden border-b border-r px-1 py-1 md:table-cell"><StageSelect name={client.name} value={stageValue} hasLead={Boolean(leadSource)} onChange={updateStage} /></td>
+                <td className="hidden border-b border-r px-2 py-2 text-right tabular-nums md:table-cell">{money.format(client.lifetimeRevenue)} zł</td>
+                <td className="hidden border-b border-r px-2 py-2 text-right tabular-nums md:table-cell">{client.purchaseCount}</td>
+                <td className="hidden border-b border-r px-2 py-2 text-right tabular-nums md:table-cell">{client.passCount}</td>
+                <td className="hidden border-b border-r px-2 py-2 text-right tabular-nums md:table-cell">{dateLabel.format(new Date(client.lastPurchaseDate))}</td>
+                <td className="hidden border-b border-r px-2 py-2 text-right tabular-nums md:table-cell">{gap === null ? "—" : `${gap} mies.`}</td>
                 {months.map((month) => {
                   const purchases = client.months[month] ?? [];
                   const passes = purchases.filter((purchase) => purchase.isPass);
@@ -315,10 +373,12 @@ export default function ClientHistoryPage() {
                     ? passes.length > 1 ? `🎟×${passes.length}` : passCellValue(passes[0].product)
                     : purchases.length > 0 ? "•" : "";
                   const tooltip = `${client.name}, ${readableMonth(month)}: ${purchases.length ? purchases.map((purchase) => `${purchase.product} (${money.format(purchase.amount)} zł)`).join(", ") : age !== null ? `${age} mies. od ostatniego karnetu` : "brak zakupu"}`;
-                  return <td key={month} className="border-b border-r p-0.5 text-center"><button type="button" onClick={() => setSelected({ client, month })} title={tooltip} aria-label={tooltip} className={`h-8 w-full min-w-14 rounded-sm font-semibold transition hover:ring-2 hover:ring-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-600 ${isPurchase ? "text-white" : purchases.length > 0 ? "text-slate-700" : "text-slate-500"}`} style={{ background }}>{label}</button></td>;
+                  return <td key={month} className="border-b border-r p-0.5 text-center"><button type="button" onClick={() => setSelected({ client, month })} title={tooltip} aria-label={tooltip} className={`h-9 w-full min-w-12 rounded-sm font-semibold transition hover:ring-2 hover:ring-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-600 md:h-8 md:min-w-14 ${isPurchase ? "text-white" : purchases.length > 0 ? "text-slate-700" : "text-slate-500"}`} style={{ background }}>{label}</button></td>;
                 })}
               </tr>;
-            })}</tbody>
+              })}
+              {bottomSpacerHeight > 0 && <tr aria-hidden="true"><td colSpan={months.length + 9} style={{ height: bottomSpacerHeight, padding: 0, border: 0 }} /></tr>}
+            </tbody>
           </table>
         </div>}
       </section>

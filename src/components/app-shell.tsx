@@ -103,34 +103,34 @@ export function AppShell({ title, subtitle, children }: AppShellProps) {
           </div>
         </div>
 
-        <nav className="mt-3 grid min-h-9 grid-cols-2 gap-2 sm:grid-cols-5">
+        <nav className="mt-2 grid min-h-9 grid-cols-5 gap-1 sm:mt-3 sm:gap-2">
           <Link
             href="/dashboard"
-            className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/dashboard" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
+            className={`inline-flex h-9 items-center justify-center rounded-sm border px-1 text-xs font-medium sm:px-2 sm:text-sm ${pathname === "/dashboard" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
           >
-            Dashboard
+            <span className="sm:hidden">Panel</span><span className="hidden sm:inline">Dashboard</span>
           </Link>
           <Link
             href="/cashflow"
-            className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/cashflow" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
+            className={`inline-flex h-9 items-center justify-center rounded-sm border px-1 text-xs font-medium sm:px-2 sm:text-sm ${pathname === "/cashflow" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
           >
             Cashflow
           </Link>
           <Link
             href="/sales"
-            className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/sales" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
+            className={`inline-flex h-9 items-center justify-center rounded-sm border px-1 text-xs font-medium sm:px-2 sm:text-sm ${pathname === "/sales" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
           >
             Sprzedaż
           </Link>
           <Link
             href="/client-history"
-            className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/client-history" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
+            className={`inline-flex h-9 items-center justify-center rounded-sm border px-1 text-xs font-medium sm:px-2 sm:text-sm ${pathname === "/client-history" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
           >
-            Historia klientów
+            <span className="sm:hidden">Klienci</span><span className="hidden sm:inline">Historia klientów</span>
           </Link>
           <Link
             href="/settings"
-            className={`inline-flex h-9 items-center justify-center rounded-sm border px-2 text-sm font-medium ${pathname === "/settings" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
+            className={`inline-flex h-9 items-center justify-center rounded-sm border px-1 text-xs font-medium sm:px-2 sm:text-sm ${pathname === "/settings" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
           >
             Settings
           </Link>
