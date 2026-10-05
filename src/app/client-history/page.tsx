@@ -7,12 +7,13 @@ import { AppShell } from "@/components/app-shell";
 import { getHistoryLeadStage, getLeadId, LEAD_STAGE_OPTIONS, LEAD_STAGE_STORAGE_KEY, type LeadStage, type LeadStageSource } from "@/lib/lead-stage";
 import { buildGroupSmsHref, normalizeSmsPhone, prepareSalesSms } from "@/lib/sales-sms";
 
-type Purchase = { product: string; amount: number; date: string; isPass: boolean };
+type Purchase = { product: string; amount: number; date: string; isPass: boolean; passExpiresDayKey: string | null };
 type Client = {
   key: string;
   name: string;
   clientGuid: string | null;
   phone: string | null;
+  activeEntries: number | null;
   lifetimeRevenue: number;
   purchaseCount: number;
   passCount: number;
@@ -22,7 +23,7 @@ type Client = {
 type SmsTemplate = { id: string; label: string; message: string };
 type Payload = { clients?: Client[]; smsTemplates?: SmsTemplate[]; error?: string };
 type DashboardLeadsPayload = { contacts?: ({ name: string; clientGuid: string | null } & LeadStageSource)[] };
-type SortKey = "name" | "ltv" | "purchases" | "passes" | "recent" | "gap";
+type SortKey = "name" | "entries" | "ltv" | "purchases" | "passes" | "recent" | "gap";
 
 const money = new Intl.NumberFormat("pl-PL", { maximumFractionDigits: 0 });
 const monthLabel = new Intl.DateTimeFormat("pl-PL", { month: "short", year: "2-digit", timeZone: "UTC" });
@@ -54,6 +55,30 @@ function passCellValue(product: string) {
   if (entries) return entries[1];
   if (/open|bez limitu|nielimit/i.test(product)) return "∞";
   return "🎟";
+}
+
+function passTotalEntries(product: string) {
+  const bonusEntries = product.match(/(\d+)\s*\+\s*(\d+)/);
+  if (bonusEntries) return Number(bonusEntries[1]) + Number(bonusEntries[2]);
+  const entries = product.match(/(\d+)\s*wej/i);
+  return entries ? Number(entries[1]) : null;
+}
+
+function latestPass(client: Client) {
+  return Object.entries(client.months)
+    .flatMap(([month, purchases]) => purchases.filter((purchase) => purchase.isPass).map((purchase) => ({ ...purchase, month })))
+    .sort((left, right) => left.date.localeCompare(right.date))
+    .at(-1) ?? null;
+}
+
+function passProgress(remaining: number | null, product: string) {
+  const total = passTotalEntries(product);
+  if (remaining === null) return null;
+  const safeRemaining = Math.max(0, remaining);
+  if (total === null) return { remainingPercent: safeRemaining > 0 ? 100 : 0, color: "#10b981", description: `Aktualnie pozostało ${safeRemaining} wejść`, isActive: safeRemaining > 0 };
+  const remainingPercent = Math.min(100, safeRemaining / Math.max(1, total) * 100);
+  const color = remainingPercent <= 25 ? "#f43f5e" : remainingPercent <= 50 ? "#f59e0b" : "#10b981";
+  return { remainingPercent, color, description: `Aktualnie pozostało ${safeRemaining} z ${total} wejść`, isActive: safeRemaining > 0 };
 }
 
 function StageSelect({ name, value, hasLead, onChange }: {
@@ -178,8 +203,13 @@ export default function ClientHistoryPage() {
         if (gap(a) === null && gap(b) !== null) return 1;
         if (gap(b) === null && gap(a) !== null) return -1;
       }
+      if (sort.key === "entries" && (a.activeEntries === null || b.activeEntries === null)) {
+        if (a.activeEntries === null && b.activeEntries !== null) return 1;
+        if (b.activeEntries === null && a.activeEntries !== null) return -1;
+      }
       let result = 0;
       if (sort.key === "name") result = a.name.localeCompare(b.name, "pl");
+      if (sort.key === "entries") result = (a.activeEntries ?? -1) - (b.activeEntries ?? -1);
       if (sort.key === "ltv") result = a.lifetimeRevenue - b.lifetimeRevenue;
       if (sort.key === "purchases") result = a.purchaseCount - b.purchaseCount;
       if (sort.key === "passes") result = a.passCount - b.passCount;
@@ -267,13 +297,13 @@ export default function ClientHistoryPage() {
           <div className="flex items-center gap-1 md:hidden">
             <label className="sr-only" htmlFor="mobile-client-sort">Sortuj klientów</label>
             <select id="mobile-client-sort" value={sort.key} onChange={(event) => setSort((previous) => ({ ...previous, key: event.target.value as SortKey }))} className="h-8 rounded-md border bg-white px-1 text-xs">
-              <option value="name">Imię i nazwisko</option><option value="ltv">LTV</option><option value="purchases">Zakupy</option><option value="passes">Karnety</option><option value="recent">Ostatni zakup</option><option value="gap">Przerwa</option>
+              <option value="name">Imię i nazwisko</option><option value="entries">Pozostałe wejścia</option><option value="ltv">LTV</option><option value="purchases">Zakupy</option><option value="passes">Karnety</option><option value="recent">Ostatni zakup</option><option value="gap">Przerwa</option>
             </select>
             <button type="button" onClick={() => setSort((previous) => ({ ...previous, direction: previous.direction === "asc" ? "desc" : "asc" }))} aria-label={sort.direction === "asc" ? "Sortuj malejąco" : "Sortuj rosnąco"} className="flex h-8 w-8 items-center justify-center rounded-md border bg-white">{sort.direction === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}</button>
           </div>
           <span className="ml-auto text-xs text-slate-600">{visible.length} klientów<span className="hidden md:inline"> · Shift: zakres · Ctrl/⌘: pojedynczo</span></span>
         </div>
-        <details className="mt-1 text-xs text-slate-600"><summary className="cursor-pointer font-medium text-slate-700">Legenda kolorów i oznaczeń</summary><div className="mt-2 flex flex-wrap gap-x-4 gap-y-2"><span>Kolor: typ karnetu · liczba: wejścia · blednięcie: czas od zakupu · •: inny zakup</span><span>🔥 karnet w tym miesiącu · ⭐ wysokie LTV · 💤 długa przerwa</span></div><div className="mt-2 flex flex-wrap gap-2">{products.map((product) => <span key={product} className="inline-flex items-center gap-1.5 rounded-md border bg-white px-2 py-1"><span className="h-4 w-4 rounded-sm" style={{ backgroundColor: `hsl(${hue(product)} 65% 48%)` }} />{product}</span>)}</div></details>
+        <details className="mt-1 text-xs text-slate-600"><summary className="cursor-pointer font-medium text-slate-700">Legenda kolorów i oznaczeń</summary><div className="mt-2 flex flex-wrap gap-x-4 gap-y-2"><span>Kolor: typ karnetu · liczba: wejścia · blednięcie: czas od zakupu · •: inny zakup</span><span>Pasek karnetu: pozostałe / wszystkie wejścia</span><span>🔥 karnet w tym miesiącu · ⭐ wysokie LTV · 💤 długa przerwa</span></div><div className="mt-2 flex flex-wrap gap-2">{products.map((product) => <span key={product} className="inline-flex items-center gap-1.5 rounded-md border bg-white px-2 py-1"><span className="h-4 w-4 rounded-sm" style={{ backgroundColor: `hsl(${hue(product)} 65% 48%)` }} />{product}</span>)}</div></details>
       </section>
 
       <details className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 shadow-sm">
@@ -315,6 +345,7 @@ export default function ClientHistoryPage() {
               <th scope="col" className="sticky left-7 z-30 w-7 min-w-7 border-b border-r bg-slate-100 px-0.5 py-2 text-center md:left-10 md:w-10 md:min-w-10 md:px-2"><input type="checkbox" aria-label="Zaznacz widocznych klientów z numerem telefonu" checked={allVisibleSelected} onChange={toggleVisibleSelection} disabled={selectableKeys.length === 0} className="h-4 w-4 accent-sky-700" /></th>
               <th scope="col" className="sticky left-14 z-30 w-32 min-w-32 border-b border-r bg-slate-100 px-1 py-2 text-left md:left-20 md:min-w-52 md:px-3"><button type="button" onClick={() => setSortKey("name")} className="inline-flex items-center gap-1 font-semibold">Klient {sortMark("name")}</button></th>
               <th scope="col" className="hidden min-w-36 border-b border-r px-2 py-2 text-left font-semibold md:table-cell">Status leada</th>
+              <th scope="col" className="hidden min-w-20 border-b border-r px-2 py-2 text-right md:table-cell"><button type="button" onClick={() => setSortKey("entries")} className="inline-flex items-center gap-1 font-semibold">Pozostało {sortMark("entries")}</button></th>
               <th scope="col" className="hidden min-w-24 border-b border-r px-2 py-2 text-right md:table-cell"><button type="button" onClick={() => setSortKey("ltv")} className="inline-flex items-center gap-1 font-semibold">LTV {sortMark("ltv")}</button></th>
               <th scope="col" className="hidden min-w-16 border-b border-r px-2 py-2 text-right md:table-cell"><button type="button" onClick={() => setSortKey("purchases")} className="inline-flex items-center gap-1 font-semibold">Zakupy {sortMark("purchases")}</button></th>
               <th scope="col" className="hidden min-w-16 border-b border-r px-2 py-2 text-right md:table-cell"><button type="button" onClick={() => setSortKey("passes")} className="inline-flex items-center gap-1 font-semibold">Karnety {sortMark("passes")}</button></th>
@@ -323,7 +354,7 @@ export default function ClientHistoryPage() {
               {months.map((month) => <th key={month} scope="col" className={`min-w-12 border-b border-r px-1 py-2 text-center font-semibold md:min-w-16 md:px-2 ${month === nowMonth ? "bg-blue-50 text-blue-800" : ""}`}>{readableMonth(month)}</th>)}
             </tr></thead>
             <tbody>
-              {topSpacerHeight > 0 && <tr aria-hidden="true"><td colSpan={months.length + 9} style={{ height: topSpacerHeight, padding: 0, border: 0 }} /></tr>}
+              {topSpacerHeight > 0 && <tr aria-hidden="true"><td colSpan={months.length + 10} style={{ height: topSpacerHeight, padding: 0, border: 0 }} /></tr>}
               {renderedClients.map((client, offset) => {
               const index = firstRow + offset;
               const lastPass = lastPassMonth(client);
@@ -331,6 +362,9 @@ export default function ClientHistoryPage() {
               const topLtv = client.lifetimeRevenue >= ltvStarThreshold;
               const leadSource = leadSources[getLeadId(client)] ?? leadSources[getLeadId({ name: client.name, clientGuid: null })];
               const stageValue = getHistoryLeadStage(stages, client, leadSource);
+              const currentPass = latestPass(client);
+              const currentPassProgress = currentPass ? passProgress(client.activeEntries, currentPass.product) : null;
+              const currentPassLastMonth = currentPass?.passExpiresDayKey?.slice(0, 7) ?? nowMonth;
               const updateStage = (stage: LeadStage | "") => setStages((previous) => {
                 const next = { ...previous };
                 if (stage) next[getLeadId(client)] = stage;
@@ -350,6 +384,7 @@ export default function ClientHistoryPage() {
                 <td className="sticky left-7 z-10 w-7 min-w-7 border-b border-r bg-white px-0.5 py-2 text-center md:left-10 md:w-10 md:min-w-10 md:px-2"><input type="checkbox" aria-label={`Zaznacz ${client.name} do SMS-a`} checked={selectedKeySet.has(client.key)} onChange={(event) => toggleClientSelection(client.key, event.target.checked, Boolean((event.nativeEvent as MouseEvent).shiftKey))} disabled={!normalizeSmsPhone(client.phone)} title={normalizeSmsPhone(client.phone) ? undefined : "Brak poprawnego numeru telefonu"} className="h-4 w-4 accent-sky-700 disabled:cursor-not-allowed" /></td>
                 <th scope="row" className="sticky left-14 z-10 w-32 min-w-32 max-w-32 border-b border-r bg-white px-1 py-1 text-left font-medium text-slate-900 md:left-20 md:min-w-52 md:max-w-52 md:px-3 md:py-2" title={client.name}><span className="block truncate">{client.name} {gap === 0 ? "🔥" : gap !== null && gap >= 3 ? "💤" : ""} {topLtv ? "⭐" : ""}</span><span className="mt-0.5 block md:hidden"><StageSelect name={client.name} value={stageValue} hasLead={Boolean(leadSource)} onChange={updateStage} /></span></th>
                 <td className="hidden border-b border-r px-1 py-1 md:table-cell"><StageSelect name={client.name} value={stageValue} hasLead={Boolean(leadSource)} onChange={updateStage} /></td>
+                <td className="hidden border-b border-r px-2 py-2 text-right font-semibold tabular-nums md:table-cell">{client.activeEntries ?? "—"}</td>
                 <td className="hidden border-b border-r px-2 py-2 text-right tabular-nums md:table-cell">{money.format(client.lifetimeRevenue)} zł</td>
                 <td className="hidden border-b border-r px-2 py-2 text-right tabular-nums md:table-cell">{client.purchaseCount}</td>
                 <td className="hidden border-b border-r px-2 py-2 text-right tabular-nums md:table-cell">{client.passCount}</td>
@@ -366,18 +401,26 @@ export default function ClientHistoryPage() {
                   const isPurchase = passes.length > 0;
                   const color = precedingPass ? hue(precedingPass) : 0;
                   const distinctPasses = [...new Set(passes.map((purchase) => purchase.product))];
+                  const showsCurrentPassProgress = Boolean(currentPass && currentPassProgress && (
+                    month === currentPass.month
+                    || (currentPassProgress.isActive
+                      && month > currentPass.month
+                      && month <= nowMonth
+                      && month <= currentPassLastMonth)
+                  ));
                   const background = distinctPasses.length > 1
                     ? `linear-gradient(90deg, ${distinctPasses.map((product, index) => `hsl(${hue(product)} 65% 47%) ${index * 100 / distinctPasses.length}% ${(index + 1) * 100 / distinctPasses.length}%`).join(", ")})`
                     : isPurchase ? `hsl(${color} 65% 47%)` : age !== null ? `hsl(${color} 65% ${Math.min(96, 80 + age * 4)}%)` : "transparent";
-                  const label = isPurchase
+                  const regularLabel = isPurchase
                     ? passes.length > 1 ? `🎟×${passes.length}` : passCellValue(passes[0].product)
                     : purchases.length > 0 ? "•" : "";
-                  const tooltip = `${client.name}, ${readableMonth(month)}: ${purchases.length ? purchases.map((purchase) => `${purchase.product} (${money.format(purchase.amount)} zł)`).join(", ") : age !== null ? `${age} mies. od ostatniego karnetu` : "brak zakupu"}`;
-                  return <td key={month} className="border-b border-r p-0.5 text-center"><button type="button" onClick={() => setSelected({ client, month })} title={tooltip} aria-label={tooltip} className={`h-9 w-full min-w-12 rounded-sm font-semibold transition hover:ring-2 hover:ring-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-600 md:h-8 md:min-w-14 ${isPurchase ? "text-white" : purchases.length > 0 ? "text-slate-700" : "text-slate-500"}`} style={{ background }}>{label}</button></td>;
+                  const purchaseDescription = purchases.length ? purchases.map((purchase) => `${purchase.product} (${money.format(purchase.amount)} zł)`).join(", ") : age !== null ? `${age} mies. od ostatniego karnetu` : "brak zakupu";
+                  const tooltip = `${client.name}, ${readableMonth(month)}: ${purchaseDescription}${showsCurrentPassProgress ? `. ${currentPassProgress!.description}` : ""}`;
+                  return <td key={month} className="border-b border-r p-0.5 text-center"><button type="button" onClick={() => setSelected({ client, month })} title={tooltip} aria-label={tooltip} className={`relative isolate h-9 w-full min-w-12 overflow-hidden rounded-sm font-semibold transition hover:ring-2 hover:ring-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-600 md:h-8 md:min-w-14 ${isPurchase ? "text-white" : purchases.length > 0 ? "text-slate-700" : "text-slate-500"}`} style={{ background }}><span className="relative z-10 drop-shadow-[0_1px_1px_rgba(255,255,255,0.65)]">{regularLabel}</span>{showsCurrentPassProgress && <span aria-hidden="true" className="absolute inset-x-0 bottom-0 flex h-2 border-t border-white/70 bg-slate-500/35"><span className="h-full" style={{ width: `${currentPassProgress!.remainingPercent}%`, backgroundColor: currentPassProgress!.color }} /></span>}</button></td>;
                 })}
               </tr>;
               })}
-              {bottomSpacerHeight > 0 && <tr aria-hidden="true"><td colSpan={months.length + 9} style={{ height: bottomSpacerHeight, padding: 0, border: 0 }} /></tr>}
+              {bottomSpacerHeight > 0 && <tr aria-hidden="true"><td colSpan={months.length + 10} style={{ height: bottomSpacerHeight, padding: 0, border: 0 }} /></tr>}
             </tbody>
           </table>
         </div>}

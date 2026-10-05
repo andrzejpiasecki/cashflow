@@ -28,6 +28,7 @@ export async function GET() {
         userFullName: true,
         userEmail: true,
         userPhone: true,
+        passExpiresDayKey: true,
       },
     }), getCachedFitsseyClients(), db.fitsseyClientContact.findMany({
       where: { userId: SHARED_SCOPE_ID },
@@ -39,6 +40,7 @@ export async function GET() {
     const smsSettings = settings ?? await db.fitsseySettings.findFirst({ orderBy: { updatedAt: "desc" } });
 
     const phones = new Map<string, string>();
+    const entries = new Map<string, number>();
     const registerPhone = (phone: string | null, keys: (string | null | undefined)[]) => {
       if (!phone) return;
       for (const key of keys) {
@@ -47,6 +49,11 @@ export async function GET() {
     };
     for (const client of cachedClients) {
       registerPhone(client.phone, [client.externalGuid, client.clientUuid, `name:${client.normalizedName}`]);
+      if (client.activeEntries !== null) {
+        for (const identity of [client.externalGuid, client.clientUuid, `name:${client.normalizedName}`]) {
+          if (identity?.trim()) entries.set(identity.trim().toLowerCase(), client.activeEntries);
+        }
+      }
     }
     for (const contact of cachedContacts) {
       registerPhone(contact.phone, [contact.clientKey, contact.clientGuid, contact.clientUuid, `name:${contact.normalizedName}`]);
@@ -57,11 +64,12 @@ export async function GET() {
       name: string;
       clientGuid: string | null;
       phone: string | null;
+      activeEntries: number | null;
       lifetimeRevenue: number;
       purchaseCount: number;
       passCount: number;
       lastPurchaseDate: string;
-      months: Record<string, { product: string; amount: number; date: string; isPass: boolean }[]>;
+      months: Record<string, { product: string; amount: number; date: string; isPass: boolean; passExpiresDayKey: string | null }[]>;
     }>();
 
     for (const sale of sales) {
@@ -76,6 +84,7 @@ export async function GET() {
         name,
         clientGuid: sale.userGuid?.trim() || null,
         phone: sale.userPhone?.trim() || phones.get(key) || phones.get(`name:${name.toLowerCase().replace(/\s+/g, " ")}`) || null,
+        activeEntries: entries.get(key) ?? entries.get(sale.clientUuid?.trim().toLowerCase() ?? "") ?? entries.get(`name:${name.toLowerCase().replace(/\s+/g, " ")}`) ?? null,
         lifetimeRevenue: 0,
         purchaseCount: 0,
         passCount: 0,
@@ -86,6 +95,9 @@ export async function GET() {
       client.name = name;
       if (!client.clientGuid && sale.userGuid?.trim()) client.clientGuid = sale.userGuid.trim();
       if (!client.phone) client.phone = sale.userPhone?.trim() || phones.get(key) || null;
+      if (client.activeEntries === null) {
+        client.activeEntries = entries.get(key) ?? entries.get(sale.clientUuid?.trim().toLowerCase() ?? "") ?? entries.get(`name:${name.toLowerCase().replace(/\s+/g, " ")}`) ?? null;
+      }
       client.lifetimeRevenue += sale.amount;
       client.purchaseCount += 1;
       if (isPass) client.passCount += 1;
@@ -95,6 +107,7 @@ export async function GET() {
         amount: sale.amount,
         date: sale.saleDate.toISOString(),
         isPass,
+        passExpiresDayKey: sale.passExpiresDayKey,
       });
       clients.set(key, client);
     }

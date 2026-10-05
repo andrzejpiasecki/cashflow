@@ -12,7 +12,8 @@ type AppShellProps = {
 };
 
 const AUTO_IMPORT_CLIENT_CHECK_KEY = "fitssey_auto_import_last_checked_at";
-const AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS = 60 * 1000;
+const AUTO_IMPORT_COMPLETED_KEY = "fitssey_auto_import_completed_at";
 const AUTO_IMPORT_PATHS = new Set(["/cashflow", "/dashboard", "/sales", "/client-history"]);
 
 export function AppShell({ title, subtitle, children }: AppShellProps) {
@@ -24,24 +25,39 @@ export function AppShell({ title, subtitle, children }: AppShellProps) {
 
     let cancelled = false;
     let inFlight = false;
+    let pendingForegroundRefresh = false;
+    let lastForegroundStartedAt = 0;
 
-    const runAutoImportCheck = () => {
-      if (cancelled || inFlight || document.visibilityState === "hidden") return;
+    const runAutoImportCheck = (trigger: "interval" | "foreground" = "interval") => {
+      if (cancelled || document.visibilityState === "hidden") return;
       const now = Date.now();
+      const isForeground = trigger === "foreground";
+      // Mobile browsers can deliver focus, visibilitychange and pageshow for one resume.
+      if (isForeground && now - lastForegroundStartedAt < 1000) return;
+      if (inFlight) {
+        if (isForeground) pendingForegroundRefresh = true;
+        return;
+      }
       const lastCheckedAt = Number(window.localStorage.getItem(AUTO_IMPORT_CLIENT_CHECK_KEY) ?? 0);
-      if (Number.isFinite(lastCheckedAt) && now - lastCheckedAt < AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS) return;
-      window.localStorage.setItem(AUTO_IMPORT_CLIENT_CHECK_KEY, String(now));
+      if (!isForeground && Number.isFinite(lastCheckedAt) && now - lastCheckedAt < AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS) return;
+      if (isForeground) lastForegroundStartedAt = now;
 
       inFlight = true;
       void fetch("/api/fitssey/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ auto: true }),
+        body: JSON.stringify({ auto: true, trigger }),
       })
         .then(async (response) => {
-          const payload = (await response.json().catch(() => ({}))) as { skipped?: boolean };
-          if (!cancelled && response.ok && !payload.skipped) {
-            window.dispatchEvent(new CustomEvent("fitssey:auto-import-completed"));
+          const payload = (await response.json().catch(() => ({}))) as { skipped?: boolean; lastImportedAt?: string };
+          if (response.ok) {
+            window.localStorage.setItem(AUTO_IMPORT_CLIENT_CHECK_KEY, String(Date.now()));
+            const completedAt = payload.lastImportedAt;
+            const previous = window.localStorage.getItem(AUTO_IMPORT_COMPLETED_KEY);
+            if (completedAt && completedAt !== previous) {
+              window.localStorage.setItem(AUTO_IMPORT_COMPLETED_KEY, completedAt);
+              window.dispatchEvent(new CustomEvent("fitssey:auto-import-completed"));
+            }
           }
         })
         .catch(() => {
@@ -49,22 +65,42 @@ export function AppShell({ title, subtitle, children }: AppShellProps) {
         })
         .finally(() => {
           inFlight = false;
+          if (pendingForegroundRefresh) {
+            pendingForegroundRefresh = false;
+            runAutoImportCheck("foreground");
+          }
         });
     };
 
+    const runOnForeground = () => runAutoImportCheck("foreground");
     const runWhenVisible = () => {
-      if (document.visibilityState === "visible") runAutoImportCheck();
+      if (document.visibilityState === "visible") runOnForeground();
+    };
+    const runOnPageRestore = (event: PageTransitionEvent) => {
+      if (event.persisted) runOnForeground();
     };
 
-    runAutoImportCheck();
-    const intervalId = window.setInterval(runAutoImportCheck, AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS);
-    window.addEventListener("focus", runAutoImportCheck);
+    const onOtherTabImport = (event: StorageEvent) => {
+      if (event.key === AUTO_IMPORT_COMPLETED_KEY && event.newValue) {
+        window.dispatchEvent(new CustomEvent("fitssey:auto-import-completed"));
+      }
+    };
+
+    runOnForeground();
+    const intervalId = window.setInterval(() => runAutoImportCheck(), AUTO_IMPORT_CLIENT_CHECK_INTERVAL_MS);
+    window.addEventListener("focus", runOnForeground);
+    window.addEventListener("pageshow", runOnPageRestore);
+    window.addEventListener("online", runOnForeground);
+    window.addEventListener("storage", onOtherTabImport);
     document.addEventListener("visibilitychange", runWhenVisible);
 
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
-      window.removeEventListener("focus", runAutoImportCheck);
+      window.removeEventListener("focus", runOnForeground);
+      window.removeEventListener("pageshow", runOnPageRestore);
+      window.removeEventListener("online", runOnForeground);
+      window.removeEventListener("storage", onOtherTabImport);
       document.removeEventListener("visibilitychange", runWhenVisible);
     };
   }, [isLoaded, isSignedIn, pathname]);
@@ -103,12 +139,12 @@ export function AppShell({ title, subtitle, children }: AppShellProps) {
           </div>
         </div>
 
-        <nav className="mt-2 grid min-h-9 grid-cols-5 gap-1 sm:mt-3 sm:gap-2">
+        <nav className="mt-2 grid min-h-9 grid-cols-[max-content_repeat(4,minmax(max-content,1fr))] gap-1 overflow-x-auto sm:mt-3 sm:grid-cols-5 sm:gap-2">
           <Link
             href="/dashboard"
             className={`inline-flex h-9 items-center justify-center rounded-sm border px-1 text-xs font-medium sm:px-2 sm:text-sm ${pathname === "/dashboard" ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}
           >
-            <span className="sm:hidden">Panel</span><span className="hidden sm:inline">Dashboard</span>
+            Dashboard
           </Link>
           <Link
             href="/cashflow"

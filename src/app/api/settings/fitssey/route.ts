@@ -138,7 +138,7 @@ export async function GET() {
       startDate: DEFAULT_START_DATE,
       citRate: 19,
       vatRate: 23,
-      autoImportIntervalMins: 180,
+      autoImportIntervalMins: 5,
       welcomeSmsMessage,
       smsTemplates,
       lastImportedAt: null,
@@ -153,7 +153,7 @@ export async function GET() {
     startDate: settings.startDate ? settings.startDate.toISOString().slice(0, 10) : "",
     citRate: settings.citRate,
     vatRate: settings.vatRate,
-    autoImportIntervalMins: settings.autoImportIntervalMins,
+    autoImportIntervalMins: settings.autoImportIntervalMins === 180 ? 5 : settings.autoImportIntervalMins,
     welcomeSmsMessage,
     smsTemplates,
     lastImportedAt: settings.lastImportedAt?.toISOString() ?? null,
@@ -191,13 +191,13 @@ export async function PATCH(request: NextRequest) {
   const startDate = parseIsoDateOrNull(body.startDate);
   const citRate = Number(body.citRate ?? 19);
   const vatRate = Number(body.vatRate ?? 23);
-  const autoImportIntervalMins = Number(body.autoImportIntervalMins ?? 180);
+  const autoImportIntervalMins = Number(body.autoImportIntervalMins ?? 5);
   const smsTemplates = normalizeSmsTemplates(body.smsTemplates, String(body.welcomeSmsMessage ?? DEFAULT_WELCOME_SMS_MESSAGE).trim() || DEFAULT_WELCOME_SMS_MESSAGE);
   const welcomeSmsMessage = smsTemplates.find((template) => template.id === "welcome")?.message
     ?? (String(body.welcomeSmsMessage ?? DEFAULT_WELCOME_SMS_MESSAGE).trim() || DEFAULT_WELCOME_SMS_MESSAGE);
   const normalizedCitRate = Number.isFinite(citRate) ? Math.min(100, Math.max(0, citRate)) : 19;
   const normalizedVatRate = Number.isFinite(vatRate) ? Math.min(100, Math.max(0, vatRate)) : 23;
-  const normalizedAutoImportIntervalMins = Number.isFinite(autoImportIntervalMins) ? Math.min(1440, Math.max(15, Math.round(autoImportIntervalMins))) : 180;
+  const normalizedAutoImportIntervalMins = Number.isFinite(autoImportIntervalMins) ? Math.min(1440, Math.max(1, Math.round(autoImportIntervalMins))) : 5;
 
   if (!studioUuid) {
     return NextResponse.json({ error: "Studio UUID jest wymagane." }, { status: 400 });
@@ -232,6 +232,7 @@ export async function PATCH(request: NextRequest) {
         autoImportIntervalMins: normalizedAutoImportIntervalMins,
       },
       update: {
+        ...(existing && (existing.studioUuid !== studioUuid || existing.startDate?.toISOString().slice(0, 10) !== startDate?.toISOString().slice(0, 10)) ? { lastImportedAt: null } : {}),
         studioUuid,
         authMode: "apiKey",
         apiKey: nextApiKey,

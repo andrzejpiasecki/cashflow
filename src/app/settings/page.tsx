@@ -30,11 +30,11 @@ type SettingsTab = "fitssey" | "taxes" | "sms" | "system";
 
 async function parseResponsePayload(response: Response) {
   const text = await response.text();
-  if (!text) return {} as SettingsPayload & { error?: string };
+  if (!text) return {} as SettingsPayload & { error?: string; skipped?: boolean };
   try {
-    return JSON.parse(text) as SettingsPayload & { error?: string };
+    return JSON.parse(text) as SettingsPayload & { error?: string; skipped?: boolean };
   } catch {
-    return {} as SettingsPayload & { error?: string };
+    return {} as SettingsPayload & { error?: string; skipped?: boolean };
   }
 }
 
@@ -80,7 +80,7 @@ export default function SettingsPage() {
   const [startDate, setStartDate] = useState("");
   const [citRate, setCitRate] = useState(19);
   const [vatRate, setVatRate] = useState(23);
-  const [autoImportIntervalMins, setAutoImportIntervalMins] = useState(180);
+  const [autoImportIntervalMins, setAutoImportIntervalMins] = useState(5);
   const [smsTemplates, setSmsTemplates] = useState<SmsTemplate[]>(DEFAULT_SMS_TEMPLATES);
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [apiKeyPreview, setApiKeyPreview] = useState<string | null>(null);
@@ -102,7 +102,7 @@ export default function SettingsPage() {
       setStartDate(data.startDate ?? "");
       setCitRate(Number(data.citRate ?? 19));
       setVatRate(Number(data.vatRate ?? 23));
-      setAutoImportIntervalMins(Number(data.autoImportIntervalMins ?? 180));
+      setAutoImportIntervalMins(Number(data.autoImportIntervalMins ?? 5));
       setSmsTemplates(data.smsTemplates?.length ? data.smsTemplates : [{ ...DEFAULT_SMS_TEMPLATES[0], message: data.welcomeSmsMessage || DEFAULT_WELCOME_SMS_MESSAGE }, ...DEFAULT_SMS_TEMPLATES.slice(1)]);
       setApiKeyConfigured(Boolean(data.apiKeyConfigured));
       setApiKeyPreview(data.apiKeyPreview ?? null);
@@ -153,14 +153,14 @@ export default function SettingsPage() {
     }
   };
 
-  const refreshFitsseyData = async () => {
+  const refreshFitsseyData = async (full = false) => {
     setIsRefreshing(true);
     setStatus("");
     try {
       const response = await fetch("/api/fitssey/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ auto: false }),
+        body: JSON.stringify({ auto: false, full }),
       });
       const payload = await parseResponsePayload(response);
       if (!response.ok) {
@@ -168,6 +168,11 @@ export default function SettingsPage() {
         return;
       }
       await load();
+      if (payload.skipped) {
+        setStatus("Import już trwa. Dane odświeżą się po jego zakończeniu.");
+        return;
+      }
+      window.dispatchEvent(new CustomEvent("fitssey:auto-import-completed"));
       setStatus("Dane Fitssey zostały odświeżone.");
     } finally {
       setIsRefreshing(false);
@@ -318,15 +323,18 @@ export default function SettingsPage() {
                   <Input
                     type="number"
                     value={autoImportIntervalMins}
-                    onChange={(event) => setAutoImportIntervalMins(Number(event.target.value) || 180)}
-                    min={15}
+                    onChange={(event) => setAutoImportIntervalMins(Number(event.target.value) || 5)}
+                    min={1}
                     max={1440}
                   />
-                  <span className="text-xs text-muted-foreground">Minimum 15 min. Aplikacja sprawdza częściej, ale Fitssey jest wołany dopiero po tym interwale.</span>
+                  <span className="text-xs text-muted-foreground">Odświeżanie przy każdym wejściu i powrocie do aplikacji, także PWA. Dodatkowo domyślnie co 5 min podczas korzystania.</span>
                 </label>
                 <div className="mt-2 flex flex-wrap gap-2">
-                <Button onClick={refreshFitsseyData} disabled={isSaving || isRefreshing || isSyncingContacts} variant="ghost" className="h-9 w-fit border bg-white px-3">
+                <Button onClick={() => void refreshFitsseyData()} disabled={isSaving || isRefreshing || isSyncingContacts} variant="ghost" className="h-9 w-fit border bg-white px-3">
                   {isRefreshing ? "Odświeżanie..." : "Odśwież dane Fitssey"}
+                </Button>
+                <Button onClick={() => void refreshFitsseyData(true)} disabled={isSaving || isRefreshing || isSyncingContacts} variant="ghost" className="h-9 w-fit border bg-white px-3">
+                  Przelicz pełną historię
                 </Button>
                 <Button onClick={syncFitsseyContacts} disabled={isSaving || isRefreshing || isSyncingContacts} variant="ghost" className="h-9 w-fit border bg-white px-3">
                   {isSyncingContacts ? "Synchronizacja..." : "Synchronizuj klientów"}

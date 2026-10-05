@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db";
+import { syncFitsseyClientEntriesForUsers } from "@/lib/fitssey-clients";
 import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
 type FitsseyAuthMode = "apiKey";
@@ -75,15 +76,11 @@ type MappedFitsseySale = {
 const FITSSEY_BASE_URL_TEMPLATE = "https://app.fitssey.com/{uuid}/api/v4/public";
 const PAGE_SIZE = 200;
 const DEFAULT_START_DATE = "2025-10-01";
-const DEFAULT_AUTO_IMPORT_INTERVAL_MINS = 180;
+const DEFAULT_AUTO_IMPORT_INTERVAL_MINS = 5;
 const RUNNING_IMPORT_LOCK_MINS = 10;
 
 function hasFitsseySettingsDelegate() {
   return "fitsseySettings" in (db as unknown as Record<string, unknown>);
-}
-
-function hasFitsseySaleDelegate() {
-  return "fitsseySale" in (db as unknown as Record<string, unknown>);
 }
 
 function getFitsseyClientContactDelegate() {
@@ -108,7 +105,7 @@ function minutesSince(date: Date, now: Date) {
   return (now.getTime() - date.getTime()) / 60000;
 }
 
-async function shouldRunAutoImport(now: Date) {
+async function shouldRunAutoImport(now: Date, isForeground = false) {
   const settings = await getImportSettings();
   if (!settings) {
     return { run: false, reason: "missing_settings" };
@@ -122,11 +119,12 @@ async function shouldRunAutoImport(now: Date) {
     return { run: false, reason: "already_running" };
   }
 
-  const intervalMins = Math.max(15, settings.autoImportIntervalMins || DEFAULT_AUTO_IMPORT_INTERVAL_MINS);
-  if (settings.lastImportedAt && minutesSince(settings.lastImportedAt, now) < intervalMins) {
+  const intervalMins = Math.max(1, settings.autoImportIntervalMins === 180 ? DEFAULT_AUTO_IMPORT_INTERVAL_MINS : settings.autoImportIntervalMins || DEFAULT_AUTO_IMPORT_INTERVAL_MINS);
+  if (!isForeground && settings.lastImportedAt && minutesSince(settings.lastImportedAt, now) < intervalMins) {
     return {
       run: false,
       reason: "too_soon",
+      lastImportedAt: settings.lastImportedAt.toISOString(),
       nextAllowedAt: new Date(settings.lastImportedAt.getTime() + intervalMins * 60000).toISOString(),
     };
   }
@@ -210,6 +208,10 @@ function findPhoneValue(value: unknown): string | null {
 
 function normalizeName(value: unknown) {
   return safeText(value).replace(/\s+/g, " ").toLowerCase();
+}
+
+function isPassProductName(value: string) {
+  return /karnet|pass|pakiet|\d+\s*wej(?:ść|sc)|\d+\s*\+\s*\d+/i.test(value);
 }
 
 function getSaleClientKey(row: MappedFitsseySale) {
@@ -324,27 +326,6 @@ function attachPassValidity(sales: MappedFitsseySale[], pricingOptions: FitsseyC
   return sales;
 }
 
-async function replaceFitsseySalesCache(mapped: MappedFitsseySale[]) {
-  if (!hasFitsseySaleDelegate()) return [];
-
-  await db.$transaction(async (tx) => {
-    await tx.fitsseySale.deleteMany({
-      where: { userId: SHARED_SCOPE_ID },
-    });
-
-    if (mapped.length === 0) return;
-
-    const chunkSize = 500;
-    for (let start = 0; start < mapped.length; start += chunkSize) {
-      await tx.fitsseySale.createMany({
-        data: mapped.slice(start, start + chunkSize),
-      });
-    }
-  });
-
-  return mapped;
-}
-
 async function upsertClientContactsFromSales(rows: MappedFitsseySale[]) {
   const fitsseyClientContact = getFitsseyClientContactDelegate();
   if (!fitsseyClientContact) return 0;
@@ -443,7 +424,7 @@ function buildHeaders(config: FitsseyAuthConfig): HeadersInit {
 
 async function fetchSalesPage(baseUrl: string, studioUuid: string, startDate: string, endDate: string, page: number, headers: HeadersInit) {
   const url = `${baseUrl}/report/finance/sales?startDate=${startDate}&endDate=${endDate}&page=${page}&count=${PAGE_SIZE}`;
-  const response = await fetch(url, { method: "GET", headers, cache: "no-store" });
+  const response = await fetch(url, { method: "GET", headers, cache: "no-store", signal: AbortSignal.timeout(30_000) });
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`Fitssey API ${response.status} (studioUuid=${studioUuid}): ${body.slice(0, 140)}`);
@@ -463,7 +444,8 @@ async function fetchSalesRows(config: FitsseyAuthConfig, startDate: string, endD
   }
 
   const payload = firstPayload as { collection?: FitsseySalesRow[]; pages?: number };
-  const rows = Array.isArray(payload.collection) ? [...payload.collection] : [];
+  if (!Array.isArray(payload.collection)) throw new Error("Nieprawidłowy format odpowiedzi Fitssey API.");
+  const rows = [...payload.collection];
   const pages = Number(payload.pages) || 1;
 
   for (let page = 2; page <= pages; page += 1) {
@@ -474,6 +456,8 @@ async function fetchSalesRows(config: FitsseyAuthConfig, startDate: string, endD
     }
     if (nextPayload && typeof nextPayload === "object" && Array.isArray((nextPayload as { collection?: FitsseySalesRow[] }).collection)) {
       rows.push(...((nextPayload as { collection: FitsseySalesRow[] }).collection));
+    } else {
+      throw new Error(`Nieprawidłowy format odpowiedzi Fitssey API na stronie ${page}.`);
     }
   }
 
@@ -494,7 +478,7 @@ async function fetchClientPricingOptions(config: FitsseyAuthConfig, sales: Mappe
     const url = `${baseUrl}/client/${encodeURIComponent(client.userGuid)}/client-pricing-option/all?page=1&count=1000`;
     let response: Response | null = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      response = await fetch(url, { method: "GET", headers, cache: "no-store" });
+      response = await fetch(url, { method: "GET", headers, cache: "no-store", signal: AbortSignal.timeout(30_000) });
       if (response.status !== 429) break;
       const retryAfterSeconds = Math.max(1, Number(response.headers.get("retry-after")) || 30);
       await new Promise((resolve) => setTimeout(resolve, (retryAfterSeconds + 1) * 1000));
@@ -598,150 +582,198 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  let locked = false;
   try {
-    const body = (await request.json().catch(() => ({}))) as { auto?: boolean };
+    const body = (await request.json().catch(() => ({}))) as { auto?: boolean; full?: boolean; trigger?: "interval" | "foreground" };
     const isAutoImport = body.auto === true;
 
     const now = new Date();
     if (isAutoImport) {
-      const autoDecision = await shouldRunAutoImport(now);
+      const autoDecision = await shouldRunAutoImport(now, body.trigger === "foreground");
       if (!autoDecision.run) {
         return NextResponse.json({
           skipped: true,
           reason: autoDecision.reason,
+          lastImportedAt: "lastImportedAt" in autoDecision ? autoDecision.lastImportedAt : undefined,
           nextAllowedAt: "nextAllowedAt" in autoDecision ? autoDecision.nextAllowedAt : undefined,
         });
       }
-      await updateImportStatus("running: auto import");
-    } else {
-      await updateImportStatus("running: manual import");
     }
+    const settings = await getImportSettings();
+    if (!settings) throw new Error("Uzupełnij ustawienia Fitssey.");
+    const claim = await db.fitsseySettings.updateMany({
+      where: {
+        id: settings.id,
+        updatedAt: settings.updatedAt,
+        OR: [
+          { lastImportStatus: null },
+          { NOT: { lastImportStatus: { startsWith: "running:" } } },
+          { updatedAt: { lt: new Date(now.getTime() - RUNNING_IMPORT_LOCK_MINS * 60_000) } },
+        ],
+      },
+      data: { lastImportStatus: isAutoImport ? "running: auto import" : "running: manual import" },
+    });
+    if (claim.count === 0) return NextResponse.json({ skipped: true, reason: "already_running" });
+    locked = true;
 
     const config = await resolveAuthConfig();
-    const startDate = config.startDate || DEFAULT_START_DATE;
+    // Re-read whole months: this catches recent corrections and keeps rounded cashflow totals exact.
+    const overlap = new Date((settings.lastImportedAt ?? now).getTime() - 7 * 86_400_000);
+    const recentStart = `${overlap.toISOString().slice(0, 7)}-01`;
+    const fullImport = body.full === true || !settings.lastImportedAt;
+    const startDate = fullImport ? config.startDate : [config.startDate, recentStart].sort().at(-1)!;
     const endDate = now.toISOString().slice(0, 10);
     const rows = await fetchSalesRows(config, startDate, endDate);
     const mappedSales = mapSalesRowsForCache(rows);
     const clientPricingOptions = await fetchClientPricingOptions(config, mappedSales);
-    const mappedRows = await replaceFitsseySalesCache(
-      attachPassValidity(mappedSales, clientPricingOptions),
-    );
+    // Pricing-option matching needs older purchases of the same pass to retain the correct ordinal.
+    const unlimitedGuids = [...new Set(mappedSales.filter((sale) => normalizeName(sale.itemName) === "karnet bez limitu").flatMap((sale) => sale.userGuid ? [sale.userGuid] : []))];
+    const olderPassSales = !fullImport && unlimitedGuids.length ? await db.fitsseySale.findMany({
+      where: { userId: SHARED_SCOPE_ID, saleDayKey: { lt: startDate }, userGuid: { in: unlimitedGuids }, itemName: { equals: "Karnet bez limitu", mode: "insensitive" } },
+    }) : [];
+    attachPassValidity([...olderPassSales, ...mappedSales], clientPricingOptions);
+    const mappedRows = mappedSales;
     const passValidityMatched = mappedRows.filter((row) => row.passExpiresDayKey !== null).length;
     const contactsUpserted = await upsertClientContactsFromSales(mappedRows);
+    const entryUsers = [...mappedRows]
+      .filter((row): row is MappedFitsseySale & { userGuid: string } => Boolean(row.userGuid))
+      .sort((left, right) => {
+        const leftActive = left.passExpiresDayKey !== null && left.passExpiresDayKey >= endDate;
+        const rightActive = right.passExpiresDayKey !== null && right.passExpiresDayKey >= endDate;
+        const leftPass = isPassProductName(left.itemName);
+        const rightPass = isPassProductName(right.itemName);
+        return Number(rightActive) - Number(leftActive)
+          || Number(rightPass) - Number(leftPass)
+          || right.saleDate.getTime() - left.saleDate.getTime();
+      })
+      .map((row) => ({ externalGuid: row.userGuid, clientUuid: row.clientUuid }));
+    const entriesSync = await syncFitsseyClientEntriesForUsers(config.studioUuid, config.apiKey, entryUsers);
     const aggregated = aggregateRevenueByProductAndMonth(rows);
-
-    if (aggregated.size === 0) {
-      await updateImportStatus("ok: 0 produktów", new Date());
-      return NextResponse.json({ created: 0, updated: 0, products: 0 });
-    }
 
     let created = 0;
     let updated = 0;
     let deletedDuplicates = 0;
 
-    const existingImported = await db.flowRow.findMany({
-      where: {
-        type: "income",
-        OR: [
-          { isImported: true },
-          { amount: 0, startMonth: "2000-01" },
-        ],
-      },
-      select: { id: true, name: true, createdAt: true, monthValues: true },
-      orderBy: { createdAt: "asc" },
-    });
-    const normalizeName = (value: string) => value.replace(/\s+/g, " ").trim();
-    const existingByName = new Map<string, { id: string; name: string }[]>();
-    for (const row of existingImported) {
-      const key = normalizeName(row.name);
-      const grouped = existingByName.get(key) ?? [];
-      grouped.push({ id: row.id, name: row.name });
-      existingByName.set(key, grouped);
-    }
-
-    const seenKeys = new Set<string>();
-
-    const aggregatedEntries = [...aggregated.entries()].sort((a, b) => a[1].name.localeCompare(b[1].name, "pl", { sensitivity: "base" }));
-
-    for (const [key, data] of aggregatedEntries) {
-      const { name, monthValues, vatRate } = data;
-      if (Object.keys(monthValues).length === 0) continue;
-      seenKeys.add(key);
-      const existingRows = existingByName.get(key) ?? [];
-
-      if (existingRows.length === 0) {
-        await db.flowRow.create({
-          data: {
-            userId: SHARED_SCOPE_ID,
-            type: "income",
-            name,
-            isImported: true,
-            vatRate,
-            amount: 0,
-            startMonth: "2000-01",
-            endMonth: null,
-            monthValues,
-          },
-        });
-        created += 1;
-      } else {
-        const [keeper, ...duplicates] = existingRows;
-        await db.flowRow.update({
-          where: { id: keeper.id },
-          data: {
-            name,
-            isImported: true,
-            vatRate,
-            amount: 0,
-            startMonth: "2000-01",
-            endMonth: null,
-            monthValues,
-          },
-        });
-        updated += 1;
-        if (duplicates.length > 0) {
-          const deleted = await db.flowRow.deleteMany({
-            where: { id: { in: duplicates.map((row) => row.id) } },
-          });
-          deletedDuplicates += deleted.count;
+    await db.$transaction(async (tx) => {
+      const saleScope = { userId: SHARED_SCOPE_ID, ...(fullImport ? {} : { saleDayKey: { gte: startDate, lte: endDate } }) };
+      const cachedSales = await tx.fitsseySale.findMany({ where: saleScope });
+      // Compare multisets so identical real purchases remain distinct and unchanged rows keep their IDs.
+      const saleFields = Object.keys(mappedRows[0] ?? {}) as (keyof MappedFitsseySale)[];
+      const signatures = (sales: MappedFitsseySale[]) => sales.map((sale) => JSON.stringify(saleFields.map((field) => sale[field]))).sort();
+      const salesChanged = cachedSales.length !== mappedRows.length
+        || JSON.stringify(signatures(cachedSales)) !== JSON.stringify(signatures(mappedRows));
+      if (salesChanged) {
+        await tx.fitsseySale.deleteMany({ where: saleScope });
+        for (let start = 0; start < mappedRows.length; start += 500) {
+          await tx.fitsseySale.createMany({ data: mappedRows.slice(start, start + 500) });
         }
       }
-    }
-
-    const staleRows = existingImported
-      .filter((row) => !seenKeys.has(normalizeName(row.name)))
-      .map((row) => row.id);
-    if (staleRows.length > 0) {
-      const deleted = await db.flowRow.deleteMany({
-        where: { id: { in: staleRows } },
+      const existingImported = await tx.flowRow.findMany({
+        where: {
+          userId: SHARED_SCOPE_ID,
+          type: "income",
+          OR: [
+            { isImported: true },
+            { amount: 0, startMonth: "2000-01" },
+          ],
+        },
+        select: { id: true, name: true, createdAt: true, monthValues: true, vatRate: true, isImported: true, amount: true, startMonth: true, endMonth: true },
+        orderBy: { createdAt: "asc" },
       });
-      deletedDuplicates += deleted.count;
-    }
+      const normalizeName = (value: string) => value.replace(/\s+/g, " ").trim();
+      if (!fullImport) {
+        for (const row of existingImported) {
+          const key = normalizeName(row.name);
+          const oldMonths = Object.fromEntries(Object.entries(row.monthValues as Record<string, number>).filter(([month]) => month < startDate.slice(0, 7)));
+          const recent = aggregated.get(key);
+          const monthValues = { ...oldMonths, ...recent?.monthValues };
+          if (Object.keys(monthValues).length > 0) {
+            aggregated.set(key, { name: recent?.name ?? row.name, monthValues, vatRate: recent?.vatRate ?? row.vatRate ?? 8 });
+          }
+        }
+      }
+      const existingByName = new Map<string, (typeof existingImported)[number][]>();
+      for (const row of existingImported) {
+        const key = normalizeName(row.name);
+        const grouped = existingByName.get(key) ?? [];
+        grouped.push(row);
+        existingByName.set(key, grouped);
+      }
 
-    // Safety cleanup for legacy/invalid imported rows with zero total history.
-    const zeroTotalImportedIds = existingImported
-      .filter((row) => {
-        const monthValues = row.monthValues as Record<string, unknown>;
-        const total = Object.values(monthValues ?? {}).reduce<number>(
-          (sum, value) => sum + (typeof value === "number" ? value : Number(value) || 0),
-          0,
-        );
-        return total <= 0;
-      })
-      .map((row) => row.id);
-    if (zeroTotalImportedIds.length > 0) {
-      const deleted = await db.flowRow.deleteMany({
-        where: { id: { in: zeroTotalImportedIds } },
-      });
-      deletedDuplicates += deleted.count;
-    }
+      const seenKeys = new Set<string>();
 
-    await updateImportStatus(`ok: products=${aggregated.size}, created=${created}, updated=${updated}, removed=${deletedDuplicates}, contacts=${contactsUpserted}, passValidity=${passValidityMatched}`, new Date());
+      const aggregatedEntries = [...aggregated.entries()].sort((a, b) => a[1].name.localeCompare(b[1].name, "pl", { sensitivity: "base" }));
 
-    return NextResponse.json({ created, updated, products: aggregated.size, removed: deletedDuplicates, contacts: contactsUpserted, passValidity: passValidityMatched, skipped: false });
+      for (const [key, data] of aggregatedEntries) {
+        const { name, monthValues, vatRate } = data;
+        if (Object.keys(monthValues).length === 0) continue;
+        seenKeys.add(key);
+        const existingRows = existingByName.get(key) ?? [];
+
+        if (existingRows.length === 0) {
+          await tx.flowRow.create({
+            data: {
+              userId: SHARED_SCOPE_ID,
+              type: "income",
+              name,
+              isImported: true,
+              vatRate,
+              amount: 0,
+              startMonth: "2000-01",
+              endMonth: null,
+              monthValues,
+            },
+          });
+          created += 1;
+        } else {
+          const [keeper, ...duplicates] = existingRows;
+          const previousMonths = keeper.monthValues as Record<string, number>;
+          const sameMonths = Object.keys(previousMonths).length === Object.keys(monthValues).length
+            && Object.entries(monthValues).every(([month, value]) => previousMonths[month] === value);
+          if (!sameMonths || keeper.name !== name || keeper.vatRate !== vatRate || !keeper.isImported
+            || keeper.amount !== 0 || keeper.startMonth !== "2000-01" || keeper.endMonth !== null) {
+            await tx.flowRow.update({
+              where: { id: keeper.id },
+              data: {
+                name,
+                isImported: true,
+                vatRate,
+                amount: 0,
+                startMonth: "2000-01",
+                endMonth: null,
+                monthValues,
+              },
+            });
+            updated += 1;
+          }
+          if (duplicates.length > 0) {
+            const deleted = await tx.flowRow.deleteMany({
+              where: { id: { in: duplicates.map((row) => row.id) } },
+            });
+            deletedDuplicates += deleted.count;
+          }
+        }
+      }
+
+      const staleRows = existingImported
+        .filter((row) => !seenKeys.has(normalizeName(row.name)))
+        .map((row) => row.id);
+      if (staleRows.length > 0) {
+        const deleted = await tx.flowRow.deleteMany({
+          where: { id: { in: staleRows } },
+        });
+        deletedDuplicates += deleted.count;
+      }
+
+    }, { timeout: 30_000 });
+
+    const importedAt = new Date();
+    await updateImportStatus(`ok: mode=${fullImport ? "full" : "incremental"}, range=${startDate}..${endDate}, products=${aggregated.size}, created=${created}, updated=${updated}, removed=${deletedDuplicates}, contacts=${contactsUpserted}, passValidity=${passValidityMatched}, entries=${entriesSync.updated}/${entriesSync.checked}`, importedAt);
+
+    return NextResponse.json({ created, updated, products: aggregated.size, removed: deletedDuplicates, contacts: contactsUpserted, passValidity: passValidityMatched, entries: entriesSync, skipped: false, lastImportedAt: importedAt.toISOString(), mode: fullImport ? "full" : "incremental", startDate, endDate });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Import failed.";
-    await updateImportStatus(`error: ${message}`);
+    if (locked) await updateImportStatus(`error: ${message}`);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

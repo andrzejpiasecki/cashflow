@@ -453,7 +453,7 @@ export default function CashflowPage() {
         key: month.key,
         income: effectiveIncome,
         taxableIncome,
-        forecastIncome: forecastImportedIncome,
+        forecastIncome: effectiveIncome,
         expenses: month.expenses,
         balance,
         taxableBalance,

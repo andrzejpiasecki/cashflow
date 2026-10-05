@@ -57,7 +57,7 @@ model FitsseySettings {
   citRate                 Float           @default(19)
   vatRate                 Float           @default(23)
   autoImportEnabled       Boolean         @default(true)
-  autoImportIntervalMins  Int             @default(180)
+  autoImportIntervalMins  Int             @default(5)
   welcomeSmsMessage       String?
   smsTemplates            Json?
   lastImportedAt          DateTime?

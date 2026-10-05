@@ -7,6 +7,7 @@ import { DEFAULT_WELCOME_SMS_MESSAGE, normalizeSmsTemplates } from "@/lib/fitsse
 import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
 type SalesRecord = {
+  id: string;
   date: Date;
   month: string;
   dayKey: string;
@@ -132,6 +133,7 @@ async function getCachedSalesRecords(): Promise<SalesRecord[]> {
       || `name:${normalizeName(clientName)}`;
 
     return {
+      id: row.id,
       date: row.saleDate,
       month: row.saleMonthKey,
       dayKey: row.saleDayKey,
@@ -400,6 +402,7 @@ function buildRecentPurchases(
         || null;
 
       return {
+        id: row.id,
         date: row.date.toISOString(),
         clientName: row.clientName,
         clientGuid: row.clientGuid,

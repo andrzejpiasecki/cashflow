@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { test } from 'node:test';
 import ts from 'typescript';
+import * as entryBalance from '../src/lib/fitssey-entry-balance.ts';
 
 function loadSync({ remoteClients, payload }) {
   const source = fs.readFileSync(
@@ -45,6 +46,7 @@ function loadSync({ remoteClients, payload }) {
       json: async () => payload ?? ({ collection: remoteClients, pages: 1 }),
     }),
     require: (name) => {
+      if (name === '@/lib/fitssey-entry-balance') return entryBalance;
       if (name === '@/lib/db') return { db };
       if (name === '@/lib/shared-scope') return { SHARED_SCOPE_ID: 'shared' };
       throw new Error(`Unexpected import: ${name}`);

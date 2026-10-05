@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { pickActiveEntries } from "@/lib/fitssey-entry-balance";
 import { SHARED_SCOPE_ID } from "@/lib/shared-scope";
 
 const FITSSEY_BASE_URL_TEMPLATE = "https://app.fitssey.com/{uuid}/api/v4/public";
@@ -118,55 +119,6 @@ function parseCollection(payload: unknown) {
   if (!payload || typeof payload !== "object") return [];
   const collection = (payload as { collection?: unknown }).collection;
   return Array.isArray(collection) ? collection : [];
-}
-
-function toFiniteInt(value: unknown) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return null;
-  return Math.max(0, Math.round(n));
-}
-
-function extractEntriesFromValue(value: unknown): number | null {
-  const direct = toFiniteInt(value);
-  if (direct !== null) return direct;
-  if (!value || typeof value !== "object") return null;
-
-  const objectValue = value as Record<string, unknown>;
-  const keys = [
-    "remainingEntries",
-    "availableEntries",
-    "activeEntries",
-    "entriesLeft",
-    "leftEntries",
-    "unusedEntries",
-    "quantityAvailable",
-    "leftQuantity",
-    "remainingQuantity",
-  ];
-  let best: number | null = null;
-
-  for (const key of keys) {
-    const parsed = toFiniteInt(objectValue[key]);
-    if (parsed === null) continue;
-    best = best === null ? parsed : Math.max(best, parsed);
-  }
-
-  const nestedCandidates = [
-    objectValue.item,
-    objectValue.pass,
-    objectValue.passInstance,
-    objectValue.contract,
-    objectValue.clientContract,
-    objectValue.pricingOption,
-    objectValue.clientPricingOption,
-    objectValue.meta,
-  ];
-  for (const nested of nestedCandidates) {
-    const parsed = extractEntriesFromValue(nested);
-    if (parsed === null) continue;
-    best = best === null ? parsed : Math.max(best, parsed);
-  }
-  return best;
 }
 
 function mapClientRow(row: FitsseyClientApiRow): NormalizedFitsseyClient | null {
@@ -348,35 +300,38 @@ export async function syncFitsseyClientsCache(studioUuid: string, apiKey: string
 }
 
 async function fetchEntriesByEndpoint(baseUrl: string, headers: HeadersInit, endpointPath: string) {
-  const response = await fetch(`${baseUrl}${endpointPath}?page=1&count=200`, {
-    method: "GET",
-    headers,
-    cache: "no-store",
-  });
+  let response: Response | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    response = await fetch(`${baseUrl}${endpointPath}?page=1&count=200`, {
+      method: "GET",
+      headers,
+      cache: "no-store",
+    });
+    if (response.status !== 429) break;
+    const retryAfterSeconds = Math.max(1, Number(response.headers.get("retry-after")) || 1);
+    await new Promise((resolve) => setTimeout(resolve, retryAfterSeconds * 1000));
+  }
+  if (!response) return null;
+  if (response.status === 404) return null;
   if (!response.ok) {
     const body = await response.text();
-    if (response.status === 404 || response.status === 429) return null;
     throw new Error(`Fitssey entries API ${response.status}: ${body.slice(0, 140)}`);
   }
   const payload = await response.json() as unknown;
-  const entries = parseCollection(payload)
-    .map((row) => extractEntriesFromValue(row))
-    .filter((value): value is number => value !== null);
-  if (entries.length === 0) return null;
-  return Math.max(...entries);
+  return pickActiveEntries(parseCollection(payload));
 }
 
 async function fetchClientActiveEntries(studioUuid: string, apiKey: string, userId: string) {
   const baseUrl = FITSSEY_BASE_URL_TEMPLATE.replace("{uuid}", encodeURIComponent(studioUuid.trim()));
   const headers: HeadersInit = { Accept: "application/json", Authorization: `Bearer ${apiKey.trim()}` };
 
-  const contractPath = `/client/${encodeURIComponent(userId)}/client-contract/all`;
-  const fromContracts = await fetchEntriesByEndpoint(baseUrl, headers, contractPath);
-  if (fromContracts !== null) return { activeEntries: fromContracts, source: "client-contract" };
-
   const pricingPath = `/client/${encodeURIComponent(userId)}/client-pricing-option/all`;
   const fromPricingOptions = await fetchEntriesByEndpoint(baseUrl, headers, pricingPath);
   if (fromPricingOptions !== null) return { activeEntries: fromPricingOptions, source: "client-pricing-option" };
+
+  const contractPath = `/client/${encodeURIComponent(userId)}/client-contract/all`;
+  const fromContracts = await fetchEntriesByEndpoint(baseUrl, headers, contractPath);
+  if (fromContracts !== null) return { activeEntries: fromContracts, source: "client-contract" };
 
   return { activeEntries: null, source: null };
 }

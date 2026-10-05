@@ -44,6 +44,7 @@ type DashboardPayload = {
   activeClientsByMonth: Record<string, number>;
   dailyRevenue: { labels: string[]; values: number[]; previousValues: number[] };
   recentPurchases: {
+    id: string;
     date: string;
     clientName: string;
     clientGuid: string | null;
@@ -712,6 +713,7 @@ function RecentPurchasesTable({
   welcomeSmsMessage,
 }: {
   rows: {
+    id: string;
     date: string;
     clientName: string;
     clientGuid: string | null;
@@ -765,7 +767,7 @@ function RecentPurchasesTable({
             </TableRow>
           ) : (
             rows.map((row) => (
-              <TableRow key={`${row.clientName}-${row.date}-${row.product}`} className={row.isNewClient ? "bg-emerald-50/70" : ""}>
+              <TableRow key={row.id} className={row.isNewClient ? "bg-emerald-50/70" : ""}>
                 <TableCell>
                   <div className="flex items-center gap-2">
                     <ClientNameLink name={row.clientName} studioUuid={studioUuid} clientGuid={row.clientGuid} />

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { test } from 'node:test';
 import ts from 'typescript';
+import * as leadStage from '../src/lib/lead-stage.ts';
 import * as React from 'react';
 import * as jsxRuntime from 'react/jsx-runtime';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -103,6 +104,7 @@ test('search renders the active client and remaining validity even with no leads
   const pageContext = {
     exports: {},
     require: (name) => {
+      if (name === '@/lib/lead-stage') return leadStage;
       if (name === '@/lib/sales-sms') return smsContext.exports;
       if (name === 'react') return { ...React, useState: () => [state[index++], () => {}], useMemo: (fn) => fn(), useEffect: () => {} };
       if (name === 'react/jsx-runtime') return jsxRuntime;
